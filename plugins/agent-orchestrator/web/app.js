@@ -22,7 +22,7 @@
   };
   const state = { projects: [], project: null, agent: null, tab: 'messages', paused: false,
     filter: 'all', view: matchMedia('(max-width: 720px)').matches ? 'list' : 'canvas',
-    generation: 0, refreshing: false, detail: null, feedback: [], drafts: new Map(),
+    generation: 0, refreshing: false, detail: null, transcript: null, followed: null, feedback: [], drafts: new Map(),
     camera: { x: 32, y: 32, k: 1, fitted: null, touched: false }, world: { w: 0, h: 0 } };
   let token = new URLSearchParams(location.hash.slice(1)).get('token');
   // The launch capability stays in this tab, never in URLs sent to the server or localStorage.
@@ -385,7 +385,7 @@
     if (selected) {
       const statusMetric = metric(t('health.agentStatus'), statusLabel(selected), selected.role || t('common.worker'));
       statusMetric.querySelector('strong').prepend(dot(tone(selected)));
-      health.append(statusMetric, metric(t('health.phase'), raw(selected.phase || t('common.notReported')), selected.recent_message ? t('health.progressReported') : t('health.noProgress')), metric(t('health.elapsed'), elapsed(selected.elapsed_seconds), selected.active ? t('health.stillRunning') : t('health.latestRun')), metric(t('health.files'), count(selected.changed_files), t('health.fromBaseline')));
+      health.append(statusMetric, metric(t('health.phase'), raw(selected.phase || t('common.notReported')), selected.recent_message ? t('health.progressReported') : t('health.noProgress')), metric(t('health.elapsed'), elapsed(selected.elapsed_seconds), selected.active ? t('health.stillRunning') : t('health.latestRun')), metric(t('health.files'), selected.changed_files === null ? '—' : count(selected.changed_files), selected.changed_files === null ? t('summary.noBaseline') : t('health.fromBaseline')));
     } else if (p) {
       const healthMetric = metric(t('health.overall'), p.attention_required ? t('health.questionWaiting') : p.active ? t('health.inProgress') : p.completed ? t('health.historyAvailable') : t('health.noActive'), t('health.overallDetail', { active: tn('count.active', p.active), questions: tn('count.questions', p.question_count) }));
       healthMetric.querySelector('strong').prepend(dot(tone(p)));
@@ -453,7 +453,7 @@
     setTab('messages'); loadDetail();
   }
   function clearInspector() {
-    state.generation++; state.detail = null;
+    state.generation++; state.detail = null; state.transcript = null; state.followed = null;
     ['timeline', 'questions', 'history', 'summary', 'files', 'tests', 'usage', 'stdout', 'stderr'].forEach(id => $(id).replaceChildren());
     $('detail-status').textContent = t('inspector.loading');
     $('inspector-title').textContent = state.agent ? t('inspector.loadingAgent') : t('inspector.coordinator');
@@ -473,18 +473,75 @@
   function authorOf(event) {
     return event.source === 'worker' ? t('author.worker') : event.source === 'orchestrator' ? t('author.coordinator') : t('author.runner');
   }
-  function renderTimeline(events) {
-    $('timeline').replaceChildren();
-    if (!events.length) { $('timeline').append(node('li', t('chat.empty'), 'empty')); return; }
-    for (const event of events.slice(-20)) {
-      const item = node('li', null, 'bubble'); item.dataset.source = event.source === 'worker' || event.source === 'orchestrator' ? event.source : 'runner';
-      const head = node('div', null, 'bubble-head');
-      // The worker-defined phase is shown verbatim; lifecycle events fall back to their translated type.
-      head.append(node('strong', authorOf(event)), node('span', event.phase ? raw(event.phase) : ''), node('time', when(event.at)));
-      const body = event.message || event.question || (event.verdict ? t('event.review', { verdict: st('verdict', event.verdict) }) : event.state ? st('state', event.state) : st('event', event.type));
-      item.append(head, node('p', body));
-      $('timeline').append(item);
+  const LONG_TEXT = 600;
+  // The conversation is the runner's own events around the agent's output (stdout.log), then the
+  // failure reason when the job failed. Everything is rendered as plain text.
+  function conversationItems(job) {
+    const transcript = state.transcript?.agent === state.agent ? state.transcript.data : null;
+    const asItems = list => list.map(event => ({ key: `e:${event.id}`, kind: 'event', event }));
+    let started = -1;
+    job.events.forEach((event, index) => { if (event.type === 'agent_started') started = index; });
+    const items = asItems(job.events.slice(0, started + 1));
+    if (transcript) {
+      if (transcript.dropped_messages) items.push({ key: 'note:dropped', kind: 'note', text: tn('chat.dropped', transcript.dropped_messages) });
+      const finalIndex = transcript.messages.findLastIndex(message => ['text', 'result', 'error'].includes(message.kind));
+      transcript.messages.forEach((message, position) => items.push({ key: `m:${message.index}`, kind: 'message', message, final: position === finalIndex }));
+      if (transcript.thinking_blocks) items.push({ key: 'note:thinking', kind: 'note', text: tn('chat.thinking', transcript.thinking_blocks) });
+      if (transcript.log_truncated) items.push({ key: 'note:log', kind: 'note', text: t('chat.logTruncated') });
+      if (transcript.unrecognized_lines) items.push({ key: 'note:unrecognized', kind: 'note', text: tn('chat.unrecognized', transcript.unrecognized_lines) });
     }
+    items.push(...asItems(job.events.slice(started + 1)));
+    if (FAILURE.has(job.state) && job.logs.stderr.trim()) items.push({ key: 'failure', kind: 'failure', text: job.logs.stderr.trim() });
+    return items;
+  }
+  function createBubble(item) {
+    if (item.kind === 'note') return node('li', null, 'note');
+    const li = node('li', null, 'bubble');
+    const head = node('div', null, 'bubble-head'); head.append(node('strong'), node('span'), node('time'));
+    li.append(head, node('div', null, 'bubble-body'));
+    return li;
+  }
+  function setBubbleBody(li, text, clipped, open) {
+    const signature = `${text.length}:${text.slice(0, 32)}:${text.slice(-32)}:${clipped}`;
+    if (li._signature === signature) return;
+    li._signature = signature;
+    const body = li.querySelector('.bubble-body'); body.replaceChildren();
+    if (text.length > LONG_TEXT) {
+      const details = node('details'); details.open = Boolean(open); details.append(node('summary', `${text.slice(0, 240).replace(/\s+/g, ' ')}…`), node('p', text));
+      body.append(details);
+    } else body.append(node('p', text));
+    if (clipped) body.append(node('small', t('chat.clipped', { n: number(20000) }), 'muted'));
+  }
+  const MESSAGE_AUTHOR = { text: 'author.agent', output: 'author.agent', result: 'chat.result', error: 'chat.error' };
+  function updateBubble(li, item) {
+    if (item.kind === 'note') { li.textContent = item.text; return; }
+    const [head, label, time] = li.querySelector('.bubble-head').children;
+    let source; let author; let phase = ''; let at = ''; let text; let clipped = false; let open = false;
+    if (item.kind === 'event') {
+      const event = item.event; source = event.source === 'worker' || event.source === 'orchestrator' ? event.source : 'runner';
+      author = authorOf(event); at = when(event.at);
+      // The worker-defined phase is shown verbatim; lifecycle events fall back to their translated type.
+      phase = event.phase ? raw(event.phase) : '';
+      text = event.message || event.question || (event.verdict ? t('event.review', { verdict: st('verdict', event.verdict) }) : event.state ? st('state', event.state) : st('event', event.type));
+    } else if (item.kind === 'failure') {
+      source = 'failure'; author = t('chat.failure'); text = item.text;
+    } else {
+      const message = item.message; source = message.kind;
+      author = MESSAGE_AUTHOR[message.kind] ? t(MESSAGE_AUTHOR[message.kind]) : message.name || t('author.tool');
+      text = message.text; clipped = message.clipped; open = Boolean(item.final);
+    }
+    li.dataset.source = source;
+    head.textContent = author; label.textContent = phase; time.textContent = at;
+    setBubbleBody(li, text, clipped, open);
+  }
+  function renderTimeline(job) {
+    const list = $('timeline');
+    const items = conversationItems(job);
+    // Follow new output only while the reader is at the bottom (or just opened this agent).
+    const follow = state.followed !== state.agent || list.scrollHeight - list.scrollTop - list.clientHeight < 32;
+    if (!items.length) { list.replaceChildren(node('li', t('chat.empty'), 'empty')); return; }
+    reconcile(list, items, item => item.key, createBubble, updateBubble);
+    if (follow) { list.scrollTop = list.scrollHeight; state.followed = state.agent; }
   }
   function renderHistory(records) {
     const parent = $('history'); parent.replaceChildren();
@@ -544,6 +601,54 @@
     }
     for (const form of existing.values()) if (!held.includes(form) && form.dataset.answered !== 'true') form.remove();
   }
+  const USAGE_ORDER = ['input_tokens', 'output_tokens', 'thinking_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens', 'total_tokens', 'total_cost_usd', 'duration_ms'];
+  const snake = key => key.replace(/([A-Z])/g, '_$1').toLowerCase();
+  const money = value => new Intl.NumberFormat('es', { style: 'currency', currency: 'USD', maximumFractionDigits: 4 }).format(value);
+  // Providers report the same figure as camelCase and snake_case; show each once, known fields first.
+  function usageRows(usage, stats) {
+    const entries = Object.entries(usage).filter(([key]) => key !== 'provider_reported');
+    const keys = new Set(entries.map(([key]) => key));
+    const known = new Map(); const other = [];
+    for (const [key, value] of entries) {
+      const canonical = snake(key);
+      if (USAGE_ORDER.includes(canonical)) { if (key === canonical || !keys.has(canonical)) known.set(canonical, value); }
+      else other.push([key, value]);
+    }
+    if (stats?.num_turns !== undefined) known.set('num_turns', stats.num_turns);
+    const rows = [...known].sort(([a], [b]) => (USAGE_ORDER.indexOf(a) + 1 || 99) - (USAGE_ORDER.indexOf(b) + 1 || 99))
+      .map(([key, value]) => [st('usage', key), key === 'total_cost_usd' ? money(value) : key === 'duration_ms' ? elapsed(value / 1000) : count(value)]);
+    return { rows, other };
+  }
+  function renderFiles(job, toolFiles) {
+    const panel = $('files'); panel.replaceChildren();
+    if (job.files === null) panel.append(node('p', t('files.noBaseline'), 'muted'));
+    else {
+      panel.append(node('p', tn('files.count', job.files.length)));
+      if (job.files.length) { const list = node('ul'); job.files.forEach(file => list.append(node('li', file))); panel.append(list); }
+    }
+    panel.append(node('h3', t('files.fromTools')));
+    if (!toolFiles.length) { panel.append(node('p', t('files.noToolWrites'), 'muted')); return; }
+    const list = node('ul'); toolFiles.forEach(file => list.append(node('li', `${file.path} · ${file.tool}`))); panel.append(list);
+  }
+  function renderTests(job) {
+    const panel = $('tests'); panel.replaceChildren(node('p', t('tests.review', { state: st('review', job.review_state) })));
+    const review = job.review; const evidence = review?.tests || [];
+    if (review) panel.append(node('p', t('tests.recorded', { reviewer: review.reviewer, time: when(review.reviewed_at) }), 'muted'));
+    if (evidence.length) { panel.append(node('h3', t('tests.evidence'))); const list = node('ul'); evidence.forEach(test => list.append(node('li', test))); panel.append(list); }
+    else panel.append(node('p', t('tests.none'), 'muted'));
+    if (review?.notes) panel.append(node('h3', t('tests.notes')), node('p', review.notes, 'review-notes'));
+    return evidence;
+  }
+  function renderUsage(job, stats) {
+    const panel = $('usage'); panel.replaceChildren(node('p', job.usage ? t('usage.reported') : t('usage.none'), 'muted'));
+    if (!job.usage) return;
+    const { rows, other } = usageRows(job.usage, stats);
+    const list = node('dl'); rows.forEach(([name, value]) => list.append(node('dt', name), node('dd', value))); panel.append(list);
+    if (other.length) {
+      const details = node('details'); details.append(node('summary', t('usage.other', { n: other.length })));
+      const extra = node('dl'); other.forEach(([key, value]) => extra.append(node('dt', key), node('dd', count(value)))); details.append(extra); panel.append(details);
+    }
+  }
   function renderInspector() {
     const p = selectedProject(); const j = state.detail;
     const isWorker = Boolean(state.agent);
@@ -553,22 +658,24 @@
     $('local-logs').hidden = !j;
     $('detail-status').textContent = '';
     if (j) {
-      renderTimeline(j.events);
-      const filePanel = $('files'); filePanel.replaceChildren(node('p', j.files === null ? t('files.unavailable') : tn('files.count', j.files.length)));
-      if (j.files?.length) { const list = node('ul'); j.files.forEach(file => list.append(node('li', file))); filePanel.append(list); }
-      const tests = $('tests'); tests.replaceChildren(node('p', t('tests.review', { state: st('review', j.review_state) })));
-      const evidence = j.review?.tests || [];
-      if (evidence.length) { const list = node('ul'); evidence.forEach(test => list.append(node('li', test))); tests.append(list, node('p', t('tests.recorded', { reviewer: j.review.reviewer, time: when(j.review.reviewed_at) }), 'muted')); }
-      else tests.append(node('p', t('tests.none'), 'muted'));
-      const usage = $('usage'); usage.replaceChildren(node('p', j.usage ? t('usage.reported') : t('usage.none'), 'muted'));
-      if (j.usage) { const list = node('dl'); Object.entries(j.usage).filter(([key]) => key !== 'provider_reported').forEach(([key, value]) => list.append(node('dt', st('usage', key)), node('dd', count(value)))); usage.append(list); }
+      const transcript = state.transcript?.agent === state.agent ? state.transcript.data : null;
+      const toolFiles = transcript?.files || [];
+      renderTimeline(j);
+      renderFiles(j, toolFiles);
+      const evidence = renderTests(j);
+      renderUsage(j, transcript?.stats);
       $('stdout').textContent = j.logs.stdout || t('logs.noOutput'); $('stderr').textContent = j.logs.stderr || t('logs.noErrors');
       renderQuestions(j.questions.filter(q => q.state === 'pending').map(q => ({ ...q, source: 'worker' })));
       renderHistory(j.questions.filter(q => q.state !== 'pending'));
       const head = node('div', null, 'summary-head'); head.append(node('h3', t('summary.title')), node('small', t('summary.elapsed', { time: elapsed(j.elapsed_seconds) })));
       const grid = node('div', null, 'summary-grid');
-      const tokens = j.usage?.total_tokens ?? (j.usage?.input_tokens !== undefined && j.usage?.output_tokens !== undefined ? j.usage.input_tokens + j.usage.output_tokens : null);
-      grid.append(metric(t('summary.files'), count(j.changed_files), t('summary.fromBaseline')), metric(t('summary.tests'), evidence.length || '—', evidence.length ? t('summary.reviewRecords') : t('summary.notReported')), metric(t('summary.tokens'), count(tokens), j.usage?.total_cost_usd !== undefined ? `$${j.usage.total_cost_usd}` : t('summary.costUnavailable')));
+      const usage = j.usage || {};
+      const tokens = usage.total_tokens ?? (usage.input_tokens !== undefined && usage.output_tokens !== undefined ? usage.input_tokens + usage.output_tokens : null);
+      const cache = (usage.cache_read_input_tokens || 0) + (usage.cache_creation_input_tokens || 0);
+      const filesValue = j.files !== null ? count(j.files.length) : toolFiles.length ? count(toolFiles.length) : '—';
+      const filesDetail = j.files !== null ? t('summary.fromBaseline') : toolFiles.length ? t('summary.fromTools') : t('summary.noBaseline');
+      const costText = usage.total_cost_usd !== undefined ? money(usage.total_cost_usd) : t('summary.costUnavailable');
+      grid.append(metric(t('summary.files'), filesValue, filesDetail), metric(t('summary.tests'), evidence.length || '—', evidence.length ? t('summary.reviewRecords') : t('summary.notReported')), metric(t('summary.tokens'), tokens === null ? '—' : number(tokens), cache ? t('summary.cache', { cost: costText, cache: number(cache) }) : costText));
       $('summary').replaceChildren(head, grid);
     } else {
       $('timeline').replaceChildren(node('li', p?.pending_feedback.length ? t('chat.waitingCoordinator') : t('chat.noQuestions'), 'empty'));
@@ -577,12 +684,21 @@
       $('summary').replaceChildren();
     }
   }
+  // The agent's own output is fetched separately and only re-sent when stdout.log changed (etag).
+  async function loadTranscript(project, agent, generation) {
+    const current = state.transcript?.agent === agent ? state.transcript : null;
+    try {
+      const data = await api(`/api/projects/${project}/jobs/${agent}/transcript${current ? `?etag=${current.etag}` : ''}`);
+      if (generation !== state.generation || (data.unchanged && current)) return;
+      state.transcript = { agent, etag: data.etag, data };
+    } catch (_) { /* The conversation falls back to runner events; the log tails stay available. */ }
+  }
   async function loadDetail() {
     const generation = ++state.generation;
     const project = state.project; const agent = state.agent;
     if (!project) { clearInspector(); $('detail-status').textContent = t('inspector.selectProject'); return; }
     try {
-      const data = await api(`/api/projects/${project}${agent ? '/jobs/' + agent : ''}`);
+      const [data] = await Promise.all([api(`/api/projects/${project}${agent ? '/jobs/' + agent : ''}`), agent ? loadTranscript(project, agent, generation) : null]);
       if (generation !== state.generation) return;
       if (agent) state.detail = data;
       else { state.detail = null; state.feedback = data.feedback_history; const p = selectedProject(); if (p) p.pending_feedback = data.pending_feedback; }

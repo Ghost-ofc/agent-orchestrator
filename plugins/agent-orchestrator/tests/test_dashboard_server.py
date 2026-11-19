@@ -169,6 +169,45 @@ class DashboardTests(unittest.TestCase):
         self.assertIsNone(row["changed_files"])
         self.assertTrue(row["attention_required"])
 
+    def test_transcript_route_returns_bounded_conversation_with_etag(self):
+        path = jobs.job_dir("alpha")
+        (path / "stdout.log").write_text(
+            json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "Hola desde el agente"},
+                {"type": "tool_use", "name": "Write", "input": {"file_path": "/w/x.txt"}},
+            ]}})
+            + "\n"
+        )
+        url = f"/api/projects/{self.pid}/jobs/alpha/transcript"
+        status, _, raw = self.request(url)
+        self.assertEqual(status, 200)
+        data = json.loads(raw)
+        self.assertEqual(data["messages"][0]["text"], "Hola desde el agente")
+        self.assertEqual(data["files"], [{"path": "/w/x.txt", "tool": "Write"}])
+        self.assertFalse(data["unchanged"])
+        self.assertNotIn(str(self.root), raw.decode())
+        # A matching validator returns no body to re-render; an invalid one is ignored.
+        status, _, raw = self.request(f"{url}?etag={data['etag']}")
+        self.assertEqual(json.loads(raw), {"etag": data["etag"], "unchanged": True})
+        status, _, raw = self.request(f"{url}?etag=../../x")
+        self.assertFalse(json.loads(raw)["unchanged"])
+        # Growing the log invalidates the cache.
+        with (path / "stdout.log").open("a") as handle:
+            handle.write(json.dumps({"type": "result", "result": "fin"}) + "\n")
+        self.assertFalse(json.loads(self.request(f"{url}?etag={data['etag']}")[2])["unchanged"])
+
+    def test_transcript_route_keeps_authentication_and_project_scope(self):
+        url = f"/api/projects/{self.pid}/jobs/alpha/transcript"
+        self.assertEqual(self.request(url, authenticated=False)[0], 401)
+        wrong_project = f"/api/projects/{self.other_pid}/jobs/alpha/transcript"
+        self.assertEqual(self.request(wrong_project)[0], 404)
+        self.assertEqual(self.request(f"/api/projects/{self.pid}/jobs/nope/transcript")[0], 404)
+        # Query strings stay rejected everywhere except the transcript validator.
+        self.assertEqual(self.request("/api/overview?x=1")[0], 404)
+        self.assertEqual(self.request(f"/api/projects/{self.pid}/jobs/alpha?x=1")[0], 404)
+        status, _, raw = self.request(url)
+        self.assertEqual(json.loads(raw)["format"], "plain")
+
     def test_selected_detail_has_only_short_local_logs_and_review_evidence(self):
         path = jobs.job_dir("alpha")
         (path / "stdout.log").write_text("s" * 20000 + "\x1b[31mTAIL\x1b[0m")

@@ -224,7 +224,7 @@ tr.selected { background: var(--grafito-2); }
 .tabs [role=tab] { min-height: 32px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; color: var(--niebla); }
 .tabs [role=tab][aria-selected=true] { color: var(--luz); border-bottom-color: var(--cobalto); background: transparent; }
 .tabs [role=tab]:hover:not(:disabled) { background: transparent; color: var(--luz); }
-.timeline { display: grid; gap: var(--s2); max-height: 340px; overflow-y: auto; padding-right: var(--s1); }
+.timeline { display: grid; gap: var(--s2); max-height: min(60vh, 560px); overflow-y: auto; padding-right: var(--s1); }
 .bubble { padding: var(--s2) var(--s3); background: var(--grafito-2); border: 1px solid var(--hilo); border-radius: var(--r-m); }
 .bubble[data-source=worker] { border-left: 3px solid var(--cobalto); }
 .bubble[data-source=orchestrator] { border-left: 3px solid var(--ambar); }
@@ -235,6 +235,20 @@ tr.selected { background: var(--grafito-2); }
 .bubble-head time { margin-left: auto; font-family: var(--mono); }
 .bubble p { overflow-wrap: anywhere; white-space: pre-wrap; }
 .timeline .empty { padding: var(--s2) 0; }
+.bubble[data-source=text], .bubble[data-source=output] { border-left: 3px solid var(--cobalto); }
+.bubble[data-source=result] { border-left: 3px solid var(--fosforo); }
+.bubble[data-source=tool], .bubble[data-source=command] { padding: var(--s1) var(--s3); background: transparent; }
+.bubble[data-source=tool] .bubble-body p, .bubble[data-source=command] .bubble-body p { font: 11px/1.5 var(--mono); color: var(--bruma); }
+.bubble[data-source=error], .bubble[data-source=failure] { border-left: 3px solid var(--ladrillo); background: rgba(239, 111, 102, .07); }
+.bubble[data-source=failure] .bubble-head strong { color: var(--ladrillo); }
+.bubble-body details summary { cursor: pointer; color: var(--bruma); overflow-wrap: anywhere; }
+.bubble-body details[open] summary { margin-bottom: var(--s2); color: var(--niebla); }
+.bubble-body small { display: block; margin-top: var(--s1); }
+.note { padding: var(--s1) 0; color: var(--niebla); font-size: 11px; text-align: center; }
+.review-notes { white-space: pre-wrap; overflow-wrap: anywhere; }
+#files h3, #tests h3 { margin: var(--s3) 0 var(--s1); color: var(--bruma); }
+#usage details { margin-top: var(--s3); }
+#usage details summary { cursor: pointer; color: var(--bruma); }
 #files ul, #tests ul { display: grid; gap: 2px; margin: var(--s2) 0; font: 12px var(--mono); }
 #files li, #tests li { overflow-wrap: anywhere; }
 #usage dl { display: grid; grid-template-columns: auto 1fr; gap: var(--s1) var(--s4); margin-top: var(--s2); }

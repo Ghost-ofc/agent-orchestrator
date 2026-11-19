@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import secrets
 import subprocess
 import threading
@@ -14,6 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import cli_agent_job as jobs
+from agent_transcript import read_transcript
 
 WEB_ROOT = Path(__file__).resolve().parents[1] / "web"
 STATIC = {
@@ -25,6 +27,7 @@ STATIC = {
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
 }
 MAX_BODY = 65536
+ETAG_RE = re.compile(r"[0-9a-z-]{1,64}")
 ACTIVE = {"starting", "running", "needs_input", "cancelling"}
 FAILURE = {"failed", "lost", "scope_violated", "timed_out"}
 
@@ -133,6 +136,7 @@ class DashboardState:
     def __init__(self):
         self.lock = threading.RLock()
         self.snapshots: dict = {}
+        self.transcripts: dict = {}
 
     def changed_files(self, workspace: str, baseline: dict) -> list[str] | None:
         with self.lock:
@@ -389,6 +393,26 @@ class DashboardState:
             },
         }
 
+    def transcript(self, pid: str, job_id: str, etag: str | None) -> dict:
+        """Bounded conversation extracted from stdout.log; cached by (size, mtime) so polling stays cheap."""
+        log = self.verify_job(pid, job_id) / "stdout.log"
+        try:
+            stat = log.stat()
+            key = f"{stat.st_size}-{stat.st_mtime_ns}"
+        except OSError:
+            key = "missing"
+        if etag == key:
+            return {"etag": key, "unchanged": True}
+        with self.lock:
+            cached = self.transcripts.get(str(log))
+        if cached is None or cached[0] != key:
+            cached = (key, read_transcript(log))
+            with self.lock:
+                if len(self.transcripts) >= 32:
+                    self.transcripts.pop(next(iter(self.transcripts)))
+                self.transcripts[str(log)] = cached
+        return {"etag": key, "unchanged": False, **cached[1]}
+
     def answer(self, parts: list[str], value: str) -> dict:
         if (
             len(parts) == 8
@@ -512,9 +536,28 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         if not self.authenticated():
             return
-        parts = self.path.strip("/").split("/")
+        # Only the transcript route accepts a query string (its cache validator); every other
+        # route keeps matching the exact path.
+        path, _, query = self.path.partition("?")
+        parts = path.strip("/").split("/")
+        is_transcript = (
+            len(parts) == 6
+            and parts[:2] == ["api", "projects"]
+            and parts[3] == "jobs"
+            and parts[5] == "transcript"
+        )
+        if query and not is_transcript:
+            self.respond(404, {"error": "Not found"})
+            return
         try:
-            if self.path == "/api/overview":
+            if is_transcript:
+                etag = dict(
+                    pair.split("=", 1) for pair in query.split("&") if "=" in pair
+                ).get("etag")
+                data = self.server.state.transcript(
+                    parts[2], parts[4], etag if etag and ETAG_RE.fullmatch(etag) else None
+                )
+            elif self.path == "/api/overview":
                 data = self.server.state.overview()
             elif len(parts) == 3 and parts[:2] == ["api", "projects"]:
                 data = self.server.state.project(parts[2])
