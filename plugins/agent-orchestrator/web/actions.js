@@ -54,6 +54,7 @@ window.AOActions = ctx => {
   }
   function open(id, prepare) {
     const element = form(id); element.reset(); showError(element, null);
+    element.querySelector('button[type=submit]').disabled = false;
     prepare?.(element);
     dialog(id).showModal();
   }
@@ -207,6 +208,9 @@ window.AOActions = ctx => {
     const item = plan.items.find(entry => entry.id === itemId);
     if (!item) throw problem('launch.noItem');
     launching = { planId, itemId, item };
+    // A finished item or one at its attempt limit cannot be launched; say so instead of letting the
+    // engine reject a form the person already filled in.
+    if (!item.can_launch) { element.querySelector('button[type=submit]').disabled = true; throw problem('launch.blocked'); }
     $('dlg-launch-title').textContent = template ? t('launch.retryTitle') : t('launch.title');
     $('launch-item').textContent = `${plan.title} · ${item.title}`;
     const select = element.elements.executor;

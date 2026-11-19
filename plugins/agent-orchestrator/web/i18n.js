@@ -418,6 +418,7 @@
     'launch.allowConcurrent': 'Permitir otro trabajo activo en el mismo espacio de trabajo',
     'launch.confirm': 'Entiendo que se ejecutará {executor} en el espacio de trabajo de este proyecto, que puede generar costos y modificar archivos.',
     'launch.submit': 'Lanzar',
+    'launch.blocked':'Esta tarea ya está hecha o alcanzó su límite de intentos, así que no se puede lanzar de nuevo desde aquí.',
     'launch.noItem': 'La tarea ya no existe en el plan.',
     'launch.unfinished': 'El contrato aún tiene secciones por completar («<<completar>>»).',
     'launch.needConfirm': 'Confirma que entiendes lo que se va a ejecutar.',
