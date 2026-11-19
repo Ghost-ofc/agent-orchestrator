@@ -1,50 +1,112 @@
 <!doctype html>
-<html lang="en">
+<html lang="es">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
   <title>Agent Orchestrator</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/styles.css">
+  <script src="/i18n.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
-  <a class="skip-link" href="#project-title">Skip to project</a>
+  <a class="skip-link" href="#project-title" data-i18n="a11y.skip"></a>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark" aria-hidden="true">AO</span><span class="brand-name">Agent Orchestrator</span></div>
+    <ul class="totals" data-i18n-aria="summary.label">
+      <li id="sum-running" data-tone="blue"><strong>0</strong><span data-i18n="summary.running"></span></li>
+      <li id="sum-waiting" data-tone="amber"><strong>0</strong><span data-i18n="summary.waiting"></span></li>
+      <li id="sum-review" data-tone="amber"><strong>0</strong><span data-i18n="summary.review"></span></li>
+      <li id="sum-failed" data-tone="red"><strong>0</strong><span data-i18n="summary.failed"></span></li>
+      <li id="sum-done" data-tone="green"><strong>0</strong><span data-i18n="summary.done"></span></li>
+    </ul>
+    <div class="topbar-end">
+      <details id="attention" class="attention">
+        <summary id="attention-summary"><span data-i18n="attention.title"></span><span id="attention-count" class="pill">0</span></summary>
+        <div class="attention-panel">
+          <p id="attention-empty" class="empty" data-i18n="attention.empty"></p>
+          <ul id="attention-list"></ul>
+        </div>
+      </details>
+      <div id="connection" class="connection" role="status"></div>
+      <button id="pause" type="button" aria-pressed="false"></button>
+    </div>
+  </header>
   <div class="shell">
-    <aside class="rail" aria-label="Project navigation">
-      <div class="brand"><span class="brand-mark" aria-hidden="true">O</span>Agent Orchestrator</div>
-      <div class="rail-current"><span>Projects</span><span id="project-count">0</span></div>
-      <div class="rail-label">PROJECTS</div>
-      <nav id="projects" aria-label="Projects"><p class="empty">Loading projects…</p></nav>
-      <footer class="rail-footer"><time id="clock"></time><div id="connection"><span class="dot blue"></span>Connecting locally</div><span class="privacy">Private · this computer only</span></footer>
+    <aside class="rail" data-i18n-aria="rail.label">
+      <div class="rail-label"><span data-i18n="rail.projects"></span><span id="project-count" class="pill">0</span></div>
+      <nav id="projects" data-i18n-aria="rail.label"><p class="empty" data-i18n="rail.loading"></p></nav>
+      <footer class="rail-footer"><time id="clock"></time><span class="privacy" data-i18n="rail.privacy"></span></footer>
     </aside>
-    <aside class="agents-sidebar" aria-label="Agent navigation">
-      <header class="agents-nav-header"><div><h2>Agents</h2><p>All project agents</p></div><span id="agent-count">0</span></header>
-      <nav id="agent-navigation" aria-label="Agents in selected project"></nav>
-      <p id="agent-navigation-empty" class="empty">Select a project to see its agents.</p>
+    <aside class="agents-sidebar" data-i18n-aria="agents.label">
+      <header class="agents-nav-header"><div><h2 data-i18n="agents.title"></h2><p data-i18n="agents.subtitle"></p></div><span id="agent-count" class="pill">0</span></header>
+      <nav id="agent-navigation" data-i18n-aria="agents.listLabel"></nav>
+      <p id="agent-navigation-empty" class="empty"></p>
     </aside>
     <main id="main">
       <header class="project-header">
-        <div><h1 id="project-title" tabindex="-1">Projects</h1><p id="project-subtitle" class="muted">Connecting to your local agents…</p></div>
-        <div class="toolbar"><label class="filter-label" for="filter">Filter</label><select id="filter"><option value="all">All agents</option><option value="attention">Needs attention</option><option value="active">Active</option><option value="complete">Accepted</option></select><button id="pause" type="button" aria-pressed="false">Pause refresh</button></div>
+        <h1 id="project-title" tabindex="-1"></h1>
+        <p id="project-subtitle" class="muted"></p>
       </header>
       <div id="notice" role="status" aria-live="polite"></div>
-      <section id="health" class="health" aria-label="Project health"></section>
-      <div class="table-heading"><h2 id="agents-heading">Agents</h2><span id="refresh-status" class="muted">Refreshes every 2 seconds</span></div>
-      <div class="table-scroll"><table aria-labelledby="agents-heading"><colgroup><col class="agent-col"><col class="model-col"><col class="task-col"><col class="phase-col"><col class="time-col"><col class="state-col"></colgroup><thead><tr><th scope="col">Agent</th><th scope="col">Model / CLI</th><th scope="col">Current task</th><th scope="col">Phase</th><th scope="col">Elapsed</th><th scope="col">State</th></tr></thead><tbody id="agents"></tbody></table></div>
-      <p id="table-empty" class="empty" hidden>No agents match this filter.</p>
+      <section id="health" class="health" data-i18n-aria="health.label"></section>
+      <div class="toolbar">
+        <div class="seg" role="group" data-i18n-aria="view.label">
+          <button id="view-canvas" type="button" aria-pressed="true" data-i18n="view.canvas"></button>
+          <button id="view-list" type="button" aria-pressed="false" data-i18n="view.list"></button>
+        </div>
+        <label class="filter-label" for="filter" data-i18n="filter.label"></label>
+        <select id="filter">
+          <option value="all" data-i18n="filter.all"></option>
+          <option value="attention" data-i18n="filter.attention"></option>
+          <option value="active" data-i18n="filter.active"></option>
+          <option value="review" data-i18n="filter.review"></option>
+          <option value="failed" data-i18n="filter.failed"></option>
+          <option value="complete" data-i18n="filter.complete"></option>
+        </select>
+        <span id="refresh-status" class="muted"></span>
+      </div>
+      <section id="canvas-panel">
+        <div class="canvas-wrap">
+          <div id="canvas" class="canvas" tabindex="0" role="group" data-i18n-aria="canvas.label" aria-describedby="canvas-help">
+            <div id="canvas-world" class="world">
+              <svg id="canvas-links" class="links" aria-hidden="true" focusable="false"></svg>
+              <div id="canvas-nodes"></div>
+            </div>
+          </div>
+          <div class="canvas-controls" role="group" data-i18n-aria="canvas.controls">
+            <button id="zoom-in" type="button" data-i18n-aria="canvas.zoomIn" data-i18n-title="canvas.zoomIn">+</button>
+            <button id="zoom-out" type="button" data-i18n-aria="canvas.zoomOut" data-i18n-title="canvas.zoomOut">&minus;</button>
+            <button id="zoom-fit" type="button" data-i18n-aria="canvas.fit" data-i18n-title="canvas.fit">&#9635;</button>
+          </div>
+          <p id="canvas-empty" class="empty canvas-empty" hidden></p>
+        </div>
+        <p id="canvas-help" class="muted canvas-help" data-i18n="canvas.help"></p>
+      </section>
+      <section id="list-panel" hidden>
+        <div class="table-heading"><h2 id="agents-heading"></h2></div>
+        <div class="table-scroll"><table aria-labelledby="agents-heading"><colgroup><col class="agent-col"><col class="model-col"><col class="task-col"><col class="phase-col"><col class="time-col"><col class="state-col"></colgroup><thead><tr><th scope="col" data-i18n="table.agent"></th><th scope="col" data-i18n="table.model"></th><th scope="col" data-i18n="table.task"></th><th scope="col" data-i18n="table.phase"></th><th scope="col" data-i18n="table.elapsed"></th><th scope="col" data-i18n="table.state"></th></tr></thead><tbody id="agents"></tbody></table></div>
+        <p id="table-empty" class="empty" hidden></p>
+      </section>
     </main>
-    <aside class="inspector" aria-label="Selected agent inspector">
-      <header class="inspector-header"><div><h2 id="inspector-title">Select an agent</h2><p id="inspector-subtitle" class="muted">Messages and questions appear here</p></div><button id="show-messages" type="button">Messages</button></header>
-      <div class="tabs" role="tablist" aria-label="Agent details"><button type="button" role="tab" id="tab-messages" aria-controls="panel-messages" aria-selected="true" data-tab="messages">Messages</button><button type="button" role="tab" id="tab-files" aria-controls="panel-files" aria-selected="false" tabindex="-1" data-tab="files">Files</button><button type="button" role="tab" id="tab-tests" aria-controls="panel-tests" aria-selected="false" tabindex="-1" data-tab="tests">Tests</button><button type="button" role="tab" id="tab-usage" aria-controls="panel-usage" aria-selected="false" tabindex="-1" data-tab="usage">Usage</button></div>
+    <aside class="inspector" data-i18n-aria="inspector.label">
+      <header class="inspector-header"><div><h2 id="inspector-title"></h2><p id="inspector-subtitle" class="muted"></p></div><button id="show-messages" type="button" data-i18n="inspector.messagesButton"></button></header>
+      <div class="tabs" role="tablist" data-i18n-aria="inspector.tabs">
+        <button type="button" role="tab" id="tab-messages" aria-controls="panel-messages" aria-selected="true" data-tab="messages" data-i18n="tab.messages"></button>
+        <button type="button" role="tab" id="tab-files" aria-controls="panel-files" aria-selected="false" tabindex="-1" data-tab="files" data-i18n="tab.files"></button>
+        <button type="button" role="tab" id="tab-tests" aria-controls="panel-tests" aria-selected="false" tabindex="-1" data-tab="tests" data-i18n="tab.tests"></button>
+        <button type="button" role="tab" id="tab-usage" aria-controls="panel-usage" aria-selected="false" tabindex="-1" data-tab="usage" data-i18n="tab.usage"></button>
+      </div>
       <p id="detail-status" class="muted" role="status"></p>
       <section id="panel-messages" role="tabpanel" aria-labelledby="tab-messages"><ol id="timeline" class="timeline"></ol></section>
       <section id="panel-files" role="tabpanel" aria-labelledby="tab-files" hidden><div id="files"></div></section>
       <section id="panel-tests" role="tabpanel" aria-labelledby="tab-tests" hidden><div id="tests"></div></section>
       <section id="panel-usage" role="tabpanel" aria-labelledby="tab-usage" hidden><div id="usage"></div></section>
-      <section id="questions" aria-label="Questions needing your answer"></section>
-      <section id="summary" class="summary" aria-label="Agent summary"></section>
-      <section id="history" aria-label="Answered questions"></section>
-      <details id="local-logs"><summary>Local / private log tails</summary><p class="muted">Only the selected agent’s last 8 KiB per stream. May contain private repository content.</p><h3>Standard output</h3><pre id="stdout"></pre><h3>Standard error</h3><pre id="stderr"></pre></details>
+      <section id="questions" data-i18n-aria="question.label"></section>
+      <section id="summary" class="summary" data-i18n-aria="summary.agentLabel"></section>
+      <section id="history" data-i18n-aria="history.label"></section>
+      <details id="local-logs"><summary data-i18n="logs.title"></summary><p class="muted" data-i18n="logs.help"></p><h3 data-i18n="logs.stdout"></h3><pre id="stdout"></pre><h3 data-i18n="logs.stderr"></h3><pre id="stderr"></pre></details>
     </aside>
   </div>
 </body>

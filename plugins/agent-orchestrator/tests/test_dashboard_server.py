@@ -4,6 +4,7 @@ import concurrent.futures
 import http.client
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -291,7 +292,7 @@ class DashboardTests(unittest.TestCase):
         self.assertNotIn(str(self.root), json.dumps(canonical_project))
 
     def test_static_allowlist_and_security_headers(self):
-        for path in ("/", "/index.html", "/styles.css", "/app.js"):
+        for path in ("/", "/index.html", "/styles.css", "/i18n.js", "/favicon.svg", "/app.js"):
             status, headers, _ = self.request(path, authenticated=False)
             self.assertEqual(status, 200, path)
             self.assertEqual(headers["Cache-Control"], "no-store")
@@ -316,19 +317,78 @@ class DashboardTests(unittest.TestCase):
         script = (web / "app.js").read_text()
         styles = (web / "styles.css").read_text()
         self.assertIn(
-            '<aside class="agents-sidebar" aria-label="Agent navigation">', html
+            '<aside class="agents-sidebar" data-i18n-aria="agents.label">', html
         )
         self.assertIn(
-            '<nav id="agent-navigation" aria-label="Agents in selected project">', html
+            '<nav id="agent-navigation" data-i18n-aria="agents.listLabel">', html
         )
         self.assertIn('id="agent-count"', html)
         self.assertIn("reconcile($('agent-navigation'), items", script)
         self.assertIn("button.setAttribute('aria-current'", script)
-        self.assertIn("'Project overview'", script)
+        self.assertIn("t('agents.overview')", script)
         self.assertIn("selected ? [selected]", script)
         self.assertIn(".agents-sidebar", styles)
         self.assertIn(".agent-nav-button[aria-current=true]", styles)
-        self.assertIn("position:fixed", styles)
+        self.assertIn("position: sticky", styles)
+
+    def test_interface_is_spanish_with_a_central_dictionary(self):
+        web = SCRIPTS.parent / "web"
+        html = (web / "index.html").read_text()
+        script = (web / "app.js").read_text()
+        dictionary = (web / "i18n.js").read_text()
+        self.assertIn('<html lang="es">', html)
+        # The i18n script must load before the app that destructures window.I18N.
+        self.assertLess(html.index("/i18n.js"), html.index("/app.js"))
+        defined = set(re.findall(r"^\s*'([\w.]+)':", dictionary, re.M))
+        used = set(re.findall(r"\bt\('([\w.]+)'", script))
+        used |= set(re.findall(r'data-i18n(?:-aria|-title)?="([\w.]+)"', html))
+        plural_bases = set(re.findall(r"\btn\('([\w.]+)'", script))
+        for base in plural_bases:
+            used |= {f"{base}.one", f"{base}.other"}
+        # Keys chosen at run time: t(`attention.${kind}`), setConnection(color, key), errorKeys.
+        groups = {key.split(".")[0] for key in defined}
+        used |= {
+            literal
+            for literal in re.findall(r"'([a-z]+\.[a-zA-Z_]+)'", script)
+            if literal.split(".")[0] in groups
+        }
+        used |= {"attention.question", "attention.review"}
+        used -= plural_bases  # Only their .one / .other forms exist.
+        self.assertEqual(sorted(used - defined), [])
+        # Every execution, acceptance and review state the runner can emit has a label.
+        for state in (
+            "starting", "running", "needs_input", "cancelling", "cancelled", "failed",
+            "lost", "timed_out", "scope_violated", "succeeded", "awaiting_review",
+            "repair_required", "rejected", "accepted",
+        ):
+            self.assertIn(f"state.{state}", defined, state)
+        for review in ("required", "not_ready", "accepted", "repair_required", "rejected"):
+            self.assertIn(f"review.{review}", defined, review)
+        # Lifecycle events written by the runner and by workers.
+        for event in (
+            "job_created", "agent_started", "agent_finished", "worker_progress",
+            "question_asked", "question_answered", "question_expired",
+            "feedback_requested", "review_recorded", "cancellation_requested",
+            "scope_violation", "timeout_reached", "terra_fallback_started",
+        ):
+            self.assertIn(f"event.{event}", defined, event)
+        self.assertIn("state.terra_fallback_started", defined)
+
+    def test_canvas_only_animates_compositor_properties(self):
+        styles = (SCRIPTS.parent / "web" / "styles.css").read_text()
+        self.assertIn("prefers-reduced-motion: reduce", styles)
+        self.assertNotIn("transition: all", styles)
+        self.assertNotIn("transition:all", styles)
+        # Project rule: animate only transform/opacity, 200-500 ms, never linear.
+        for declaration in re.findall(r"(?<![-\w])(?:transition|animation):\s*([^;]+);", styles):
+            for part in declaration.split(","):
+                words = part.split()
+                self.assertNotIn("linear", words, declaration)
+                durations = [w for w in words if re.fullmatch(r"\d+ms", w)]
+                for duration in durations:
+                    self.assertTrue(200 <= int(duration[:-2]) <= 500, declaration)
+                if "transition" in part or words[0] in {"transform", "opacity"}:
+                    self.assertIn(words[0], {"transform", "opacity"}, declaration)
 
     def test_authentication_host_and_origin_boundary(self):
         self.assertEqual(self.request("/api/overview", authenticated=False)[0], 401)

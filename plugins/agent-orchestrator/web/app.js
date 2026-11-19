@@ -1,5 +1,6 @@
 'use strict';
 (() => {
+  const { t, tn, st, number, time, dateLong, relative, raw } = window.I18N;
   const $ = id => document.getElementById(id);
   const node = (tag, text, className) => {
     const el = document.createElement(tag);
@@ -7,8 +8,22 @@
     if (className) el.className = className;
     return el;
   };
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  const FAILURE = new Set(['failed', 'lost', 'scope_violated', 'timed_out']);
+  const REVIEW = new Set(['awaiting_review', 'repair_required', 'rejected']);
+  const RUNNING = new Set(['starting', 'running', 'cancelling']);
+  const FILTERS = {
+    all: () => true,
+    attention: job => job.attention_required,
+    active: job => job.active,
+    review: job => REVIEW.has(job.state),
+    failed: job => FAILURE.has(job.state),
+    complete: job => job.state === 'accepted',
+  };
   const state = { projects: [], project: null, agent: null, tab: 'messages', paused: false,
-    filter: 'all', generation: 0, refreshing: false, detail: null, feedback: [], drafts: new Map() };
+    filter: 'all', view: matchMedia('(max-width: 720px)').matches ? 'list' : 'canvas',
+    generation: 0, refreshing: false, detail: null, feedback: [], drafts: new Map(),
+    camera: { x: 32, y: 32, k: 1, fitted: null, touched: false }, world: { w: 0, h: 0 } };
   let token = new URLSearchParams(location.hash.slice(1)).get('token');
   // The launch capability stays in this tab, never in URLs sent to the server or localStorage.
   try {
@@ -17,39 +32,48 @@
   } catch (_) { /* In-memory access still works when browser storage is disabled. */ }
   if (location.hash.startsWith('#token=')) history.replaceState(null, '', location.pathname);
 
+  // Static markup is translated from the central dictionary.
+  for (const el of document.querySelectorAll('[data-i18n]')) el.textContent = t(el.dataset.i18n);
+  for (const el of document.querySelectorAll('[data-i18n-aria]')) el.setAttribute('aria-label', t(el.dataset.i18nAria));
+  for (const el of document.querySelectorAll('[data-i18n-title]')) el.title = t(el.dataset.i18nTitle);
+
+  const errorKeys = { 400: 'err.badAnswer', 401: 'err.auth', 403: 'err.boundary', 404: 'err.notFound', 409: 'err.notPending', 413: 'err.tooLarge' };
   async function api(path, answer) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
     try {
-    const response = await fetch(path, { signal: controller.signal, method: answer === undefined ? 'GET' : 'POST',
-      cache: 'no-store', credentials: 'omit', headers: { 'X-Orchestrator-Token': token || '',
-        ...(answer === undefined ? {} : { 'Content-Type': 'application/json' }) },
-      ...(answer === undefined ? {} : { body: JSON.stringify({ answer }) }) });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || 'The local request failed.');
-    return data;
+      const response = await fetch(path, { signal: controller.signal, method: answer === undefined ? 'GET' : 'POST',
+        cache: 'no-store', credentials: 'omit', headers: { 'X-Orchestrator-Token': token || '',
+          ...(answer === undefined ? {} : { 'Content-Type': 'application/json' }) },
+        ...(answer === undefined ? {} : { body: JSON.stringify({ answer }) }) });
+      let data = null;
+      try { data = await response.json(); } catch (_) { /* Reported through the status code below. */ }
+      if (!response.ok) throw new Error(t(errorKeys[response.status] || (answer === undefined ? 'err.request' : 'err.save')));
+      return data;
     } catch (error) {
-      if (error.name === 'AbortError') throw new Error('The local server took too long to respond. Refresh before retrying an answer.');
+      if (error.name === 'AbortError') throw new Error(t('err.timeout'));
       throw error;
     } finally { clearTimeout(timeout); }
   }
-  const label = value => String(value || 'Not reported').replaceAll('_', ' ');
-  const count = value => value === null || value === undefined ? 'Unavailable' : Number(value).toLocaleString();
-  const when = value => value ? new Date(value).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '—';
-  function ago(value) {
-    if (!value) return 'No activity yet';
-    const seconds = Math.max(0, (Date.now() - new Date(value).getTime()) / 1000);
-    return seconds < 60 ? 'Just now' : seconds < 3600 ? `${Math.floor(seconds / 60)} minutes ago` : seconds < 86400 ? `${Math.floor(seconds / 3600)} hours ago` : new Date(value).toLocaleDateString();
-  }
+  const count = value => value === null || value === undefined ? t('common.unavailable') : number(value);
+  const filesText = value => value === null || value === undefined ? t('count.filesUnknown') : tn('count.files', value);
+  const when = value => value ? time(value) : '—';
+  const ago = value => value ? relative(value) : t('common.noActivity');
   function elapsed(value) {
     if (value === null || value === undefined) return '—';
     const minutes = Math.floor(value / 60);
-    return minutes < 1 ? '<1m' : minutes < 60 ? `${minutes}m` : `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+    return minutes < 1 ? t('time.lessThanMinute') : minutes < 60 ? t('time.min', { n: minutes }) : t('time.hourMin', { h: Math.floor(minutes / 60), m: minutes % 60 });
   }
-  function tone(item) { return item.attention_required ? 'amber' : item.active ? 'blue' : item.state === 'accepted' || item.completed ? 'green' : 'neutral'; }
+  // Failures are red, anything a person can act on is amber, live work is blue, accepted work is green.
+  function tone(item) {
+    if (FAILURE.has(item.state)) return 'red';
+    if (item.attention_required) return 'amber';
+    if (item.active) return 'blue';
+    return item.state === 'accepted' || item.completed ? 'green' : 'neutral';
+  }
   function dot(color) { const el = node('span', null, `dot ${color}`); el.setAttribute('aria-hidden', 'true'); return el; }
-  function statusLabel(job) { return ({ needs_input: 'Needs answer', awaiting_review: 'Awaiting review', accepted: 'Accepted', running: 'Running', lost: 'Disconnected' })[job.state] || label(job.state); }
-  function agentName(job) { return job.cli_agent || job.model || job.cli || job.job_id; }
+  const statusLabel = job => st('state', job.state);
+  const agentName = job => job.cli_agent || job.model || job.cli || job.job_id;
   function metric(title, value, detail) {
     const el = node('div', null, 'metric');
     el.append(node('div', title, 'label'), node('strong', value));
@@ -72,11 +96,76 @@
     for (const el of existing.values()) el.remove();
   }
   const selectedProject = () => state.projects.find(project => project.id === state.project);
+
+  // ---------- Global summary and attention tray ----------
+  function renderSummary() {
+    const totals = { running: 0, waiting: 0, review: 0, failed: 0, done: 0 };
+    for (const project of state.projects) {
+      totals.waiting += project.question_count;
+      for (const job of project.jobs) {
+        if (RUNNING.has(job.state)) totals.running++;
+        else if (REVIEW.has(job.state)) totals.review++;
+        else if (FAILURE.has(job.state)) totals.failed++;
+        else if (job.state === 'accepted') totals.done++;
+      }
+    }
+    for (const [key, value] of Object.entries(totals)) {
+      const item = $(`sum-${key}`);
+      item.querySelector('strong').textContent = number(value);
+      item.dataset.empty = String(value === 0);
+    }
+  }
+  function attentionItems() {
+    const items = [];
+    for (const project of state.projects) {
+      for (const feedback of project.pending_feedback) {
+        items.push({ key: `q:${project.id}:feedback:${feedback.id}`, kind: 'question', pid: project.id, job: null,
+          title: t('attention.coordinator'), text: feedback.question, project: project.name });
+      }
+      for (const job of project.jobs) {
+        for (const question of job.pending_questions) {
+          items.push({ key: `q:${project.id}:${job.job_id}:${question.id}`, kind: 'question', pid: project.id, job: job.job_id,
+            title: agentName(job), text: question.question, project: project.name });
+        }
+        if (job.state === 'awaiting_review' || job.state === 'repair_required') {
+          items.push({ key: `r:${job.job_id}`, kind: 'review', pid: project.id, job: job.job_id,
+            title: agentName(job), text: statusLabel(job), project: project.name });
+        }
+      }
+    }
+    return items;
+  }
+  function renderAttention() {
+    const items = attentionItems();
+    $('attention-count').textContent = items.length;
+    $('attention-summary').dataset.alert = String(items.length > 0);
+    $('attention-empty').hidden = items.length > 0;
+    reconcile($('attention-list'), items, item => item.key, () => {
+      const li = node('li'); const button = node('button', null, 'attention-item'); button.type = 'button';
+      button.append(node('small', null, 'attention-kind'), node('strong'), node('span', null, 'attention-text'));
+      button.addEventListener('click', () => { focusTarget(li._target.pid, li._target.job); $('attention').open = false; });
+      li.append(button); return li;
+    }, (li, item) => {
+      li._target = item;
+      li.dataset.kind = item.kind;
+      li.querySelector('small').textContent = t('attention.open', { kind: t(`attention.${item.kind}`), project: item.project });
+      li.querySelector('strong').textContent = item.title;
+      li.querySelector('.attention-text').textContent = item.text;
+    });
+  }
+
+  // A native <details> stays open on outside clicks; close it like any popover and return focus on Escape.
+  document.addEventListener('click', event => { if (!event.target.closest('#attention')) $('attention').open = false; });
+  $('attention').addEventListener('keydown', event => {
+    if (event.key === 'Escape' && $('attention').open) { $('attention').open = false; $('attention-summary').focus(); }
+  });
+
+  // ---------- Navigation ----------
   function renderAgentNavigation(project) {
     const items = project ? [{ key: 'orchestrator', orchestrator: true }, ...project.jobs.map(job => ({ ...job, key: job.job_id }))] : [];
     $('agent-count').textContent = project ? project.jobs.length : 0;
     $('agent-navigation-empty').hidden = items.length > 0;
-    $('agent-navigation-empty').textContent = project ? 'No agents are available for this project.' : 'Select a project to see its agents.';
+    $('agent-navigation-empty').textContent = project ? t('agents.none') : t('agents.select');
     reconcile($('agent-navigation'), items, item => item.key, () => {
       const button = node('button', null, 'agent-nav-button'); button.type = 'button';
       const text = node('span', null, 'agent-nav-copy'); text.append(node('strong'), node('small'));
@@ -89,18 +178,188 @@
       button.dataset.agentId = item.orchestrator ? '' : item.job_id;
       button.setAttribute('aria-current', String(selected));
       button.querySelector('.dot').className = `dot ${item.orchestrator ? questions ? 'amber' : 'neutral' : tone(item)}`;
-      button.querySelector('strong').textContent = item.orchestrator ? 'Project overview' : agentName(item);
+      button.querySelector('strong').textContent = item.orchestrator ? t('agents.overview') : agentName(item);
       button.querySelector('small').textContent = item.orchestrator
-        ? questions ? `${questions} project question${questions === 1 ? '' : 's'} waiting` : 'All agents, plans, and project feedback'
-        : item.current_work || item.role || 'No progress update yet';
-      button.querySelector('.agent-nav-status').textContent = item.orchestrator ? questions ? 'Needs answer' : 'Ready' : statusLabel(item);
+        ? questions ? tn('rail.questions', questions) : t('agents.overviewIdle')
+        : item.current_work || item.role || t('common.noProgress');
+      button.querySelector('.agent-nav-status').textContent = item.orchestrator ? questions ? st('state', 'needs_input') : t('agents.ready') : statusLabel(item);
       button.setAttribute('aria-label', `${button.querySelector('strong').textContent}: ${button.querySelector('.agent-nav-status').textContent}. ${button.querySelector('small').textContent}`);
     });
   }
+
+  // ---------- Canvas: project -> plans -> jobs, drawn only from real relations ----------
+  const NODE = { w: 248, jobH: 100, cardH: 88, gap: 12, cols: [0, 292, 584] };
+  function buildGraph(project, rows) {
+    const grouped = new Map(project.plans.map(plan => [plan.plan_id, []]));
+    const loose = [];
+    for (const job of rows) (grouped.has(job.plan_id) ? grouped.get(job.plan_id) : loose).push(job);
+    const nodes = []; const links = []; const planNodes = [];
+    const place = (kind, key, column, top, h, data) => { const item = { kind, key, x: NODE.cols[column], y: top, h, ...data }; nodes.push(item); return item; };
+    let y = 0;
+    for (const plan of project.plans) {
+      const group = grouped.get(plan.plan_id);
+      const slots = Math.max(group.length, 1);
+      const block = slots * NODE.jobH + (slots - 1) * NODE.gap;
+      const planNode = place('plan', `plan:${plan.plan_id}`, 1, y + (block - NODE.cardH) / 2, NODE.cardH, { plan });
+      group.forEach((job, index) => {
+        const jobNode = place('job', `job:${job.job_id}`, 2, y + index * (NODE.jobH + NODE.gap), NODE.jobH, { job });
+        links.push({ from: planNode, to: jobNode, tone: tone(job) });
+      });
+      planNodes.push(planNode);
+      y += block + NODE.gap * 2;
+    }
+    const looseNodes = loose.map((job, index) => place('job', `job:${job.job_id}`, 2, y + index * (NODE.jobH + NODE.gap), NODE.jobH, { job }));
+    const height = Math.max(nodes.reduce((max, item) => Math.max(max, item.y + item.h), 0), NODE.cardH);
+    const root = place('project', 'project', 0, (height - NODE.cardH) / 2, NODE.cardH, { project });
+    nodes.unshift(nodes.pop());
+    for (const planNode of planNodes) links.push({ from: root, to: planNode, tone: planNode.plan.complete ? 'green' : 'neutral' });
+    for (const looseNode of looseNodes) links.push({ from: root, to: looseNode, tone: tone(looseNode.job) });
+    return { nodes, links, width: NODE.cols[2] + NODE.w, height };
+  }
+  function curve(a, b) {
+    const x1 = a.x + NODE.w; const y1 = a.y + a.h / 2; const x2 = b.x; const y2 = b.y + b.h / 2; const dx = (x2 - x1) / 2;
+    return `M${x1} ${y1} C${x1 + dx} ${y1} ${x2 - dx} ${y2} ${x2} ${y2}`;
+  }
+  function createNode(item) {
+    if (item.kind === 'job') {
+      const card = node('button', null, 'node node-job'); card.type = 'button';
+      const head = node('span', null, 'node-head'); head.append(dot('neutral'), node('strong', null, 'node-name'), node('span', null, 'node-badge'));
+      card.append(head, node('span', null, 'node-work'), node('span', null, 'node-meta'));
+      card.addEventListener('click', () => selectAgent(card.dataset.jobId));
+      return card;
+    }
+    if (item.kind === 'plan') {
+      const card = node('div', null, 'node node-plan');
+      card.append(node('small', t('canvas.plan'), 'node-kicker'), node('strong', null, 'node-name'), node('progress'), node('small', null, 'node-meta'));
+      return card;
+    }
+    const card = node('button', null, 'node node-project'); card.type = 'button';
+    card.append(node('small', t('canvas.project'), 'node-kicker'), node('strong', null, 'node-name'), node('small', null, 'node-meta'));
+    card.addEventListener('click', selectOrchestrator);
+    return card;
+  }
+  function updateNode(card, item) {
+    card.style.translate = `${item.x}px ${item.y}px`;
+    card.style.width = `${NODE.w}px`; card.style.height = `${item.h}px`;
+    if (item.kind === 'job') {
+      const job = item.job;
+      card.dataset.tone = tone(job); card.dataset.jobId = job.job_id;
+      card.setAttribute('aria-pressed', String(job.job_id === state.agent));
+      card.querySelector('.dot').className = `dot ${tone(job)}`;
+      card.querySelector('.node-name').textContent = agentName(job);
+      card.querySelector('.node-badge').textContent = statusLabel(job);
+      card.querySelector('.node-work').textContent = job.current_work || job.role || t('common.noProgress');
+      card.querySelector('.node-meta').textContent = [job.model || job.cli, elapsed(job.elapsed_seconds), job.changed_files === null ? null : tn('count.files', job.changed_files)].filter(Boolean).join(' · ');
+      card.setAttribute('aria-label', t('canvas.jobAria', { name: agentName(job), state: statusLabel(job), work: card.querySelector('.node-work').textContent }));
+    } else if (item.kind === 'plan') {
+      const counts = item.plan.counts || {};
+      const total = Object.values(counts).reduce((sum, value) => sum + value, 0);
+      const done = counts.done || 0;
+      card.dataset.tone = item.plan.complete ? 'green' : 'neutral';
+      card.querySelector('.node-name').textContent = item.plan.title || item.plan.plan_id;
+      card.title = card.querySelector('.node-name').textContent;
+      const bar = card.querySelector('progress'); bar.max = total || 1; bar.value = done;
+      bar.setAttribute('aria-label', t('canvas.planProgress', { done, total }));
+      card.querySelector('.node-meta').textContent = !total ? t('canvas.planNoItems') : item.plan.complete ? t('canvas.planDone') : t('canvas.planProgress', { done, total });
+    } else {
+      const project = item.project;
+      card.dataset.tone = tone(project);
+      card.setAttribute('aria-pressed', String(state.agent === null));
+      card.querySelector('.node-name').textContent = project.name;
+      card.querySelector('.node-meta').textContent = t('canvas.projectStats', { agents: tn('count.agents', project.jobs.length), plans: tn('count.plans', project.plans.length) });
+    }
+  }
+  const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+  function applyCamera() {
+    const { x, y, k } = state.camera;
+    $('canvas-world').style.transform = `translate(${x}px, ${y}px) scale(${k})`;
+  }
+  function fitCamera() {
+    const box = $('canvas'); const cw = box.clientWidth; const ch = box.clientHeight;
+    if (!cw || !ch || !state.world.w) return;
+    const pad = 32;
+    const k = clamp(Math.min((cw - pad * 2) / state.world.w, (ch - pad * 2) / state.world.h), 0.5, 1.25);
+    state.camera = { k, x: (cw - state.world.w * k) / 2, y: Math.max(pad, (ch - state.world.h * k) / 2), fitted: state.project, touched: false };
+    applyCamera();
+  }
+  function zoomAt(factor, px, py) {
+    const camera = state.camera; const k = clamp(camera.k * factor, 0.3, 1.6); const ratio = k / camera.k;
+    camera.x = px - (px - camera.x) * ratio; camera.y = py - (py - camera.y) * ratio; camera.k = k; camera.touched = true;
+    applyCamera();
+  }
+  function zoomCenter(factor) { const box = $('canvas'); zoomAt(factor, box.clientWidth / 2, box.clientHeight / 2); }
+  function renderCanvas(project, rows) {
+    // The empty message sits over the canvas only when there is nothing real to draw or the filter hides every job.
+    const message = !project ? t('canvas.empty') : !project.plans.length && !project.jobs.length ? t('table.noJobs') : project.jobs.length && !rows.length ? t('canvas.noMatch') : '';
+    $('canvas-empty').hidden = !message; $('canvas-empty').textContent = message;
+    $('canvas').hidden = !project;
+    if (!project) { $('canvas-nodes').replaceChildren(); $('canvas-links').replaceChildren(); return; }
+    const graph = buildGraph(project, rows);
+    state.world = { w: graph.width, h: graph.height };
+    reconcile($('canvas-nodes'), graph.nodes, item => item.key, createNode, updateNode);
+    const svg = $('canvas-links');
+    svg.setAttribute('width', graph.width); svg.setAttribute('height', graph.height);
+    svg.replaceChildren(...graph.links.map(link => {
+      const path = document.createElementNS(SVG_NS, 'path');
+      path.setAttribute('d', curve(link.from, link.to)); path.setAttribute('class', `link ${link.tone}`);
+      return path;
+    }));
+    if (state.camera.fitted !== state.project) fitCamera(); else applyCamera();
+  }
+  (() => {
+    const canvas = $('canvas'); let drag = null;
+    canvas.addEventListener('pointerdown', event => {
+      if (event.button !== 0 || event.target.closest('.node')) return;
+      drag = { x: event.clientX, y: event.clientY, cx: state.camera.x, cy: state.camera.y };
+      canvas.setPointerCapture(event.pointerId); canvas.dataset.dragging = 'true';
+    });
+    canvas.addEventListener('pointermove', event => {
+      if (!drag) return;
+      state.camera.x = drag.cx + event.clientX - drag.x; state.camera.y = drag.cy + event.clientY - drag.y; state.camera.touched = true;
+      applyCamera();
+    });
+    const stop = () => { drag = null; delete canvas.dataset.dragging; };
+    canvas.addEventListener('pointerup', stop); canvas.addEventListener('pointercancel', stop);
+    canvas.addEventListener('wheel', event => {
+      if (!event.ctrlKey && !event.metaKey) return;
+      event.preventDefault();
+      const rect = canvas.getBoundingClientRect();
+      zoomAt(event.deltaY < 0 ? 1.1 : 1 / 1.1, event.clientX - rect.left, event.clientY - rect.top);
+    }, { passive: false });
+    canvas.addEventListener('keydown', event => {
+      if (event.target !== canvas) return;
+      const step = 48; const moves = { ArrowLeft: [step, 0], ArrowRight: [-step, 0], ArrowUp: [0, step], ArrowDown: [0, -step] };
+      if (moves[event.key]) { event.preventDefault(); state.camera.x += moves[event.key][0]; state.camera.y += moves[event.key][1]; state.camera.touched = true; applyCamera(); }
+      else if (event.key === '+' || event.key === '=') { event.preventDefault(); zoomCenter(1.2); }
+      else if (event.key === '-') { event.preventDefault(); zoomCenter(1 / 1.2); }
+      else if (event.key === '0') { event.preventDefault(); fitCamera(); }
+    });
+    // Browsers scroll overflow:hidden boxes to reveal focus; pan the camera instead so the layout never drifts.
+    canvas.addEventListener('scroll', () => { canvas.scrollLeft = 0; canvas.scrollTop = 0; });
+    canvas.addEventListener('focusin', event => {
+      const card = event.target.closest('.node'); if (!card) return;
+      const a = card.getBoundingClientRect(); const b = canvas.getBoundingClientRect(); const margin = 16; let dx = 0; let dy = 0;
+      if (a.left < b.left + margin) dx = b.left + margin - a.left; else if (a.right > b.right - margin) dx = b.right - margin - a.right;
+      if (a.top < b.top + margin) dy = b.top + margin - a.top; else if (a.bottom > b.bottom - margin) dy = b.bottom - margin - a.bottom;
+      if (dx || dy) { state.camera.x += dx; state.camera.y += dy; state.camera.touched = true; applyCamera(); }
+    });
+    $('zoom-in').addEventListener('click', () => zoomCenter(1.2));
+    $('zoom-out').addEventListener('click', () => zoomCenter(1 / 1.2));
+    $('zoom-fit').addEventListener('click', fitCamera);
+    let resizing = 0;
+    addEventListener('resize', () => {
+      clearTimeout(resizing);
+      resizing = setTimeout(() => { if (!state.camera.touched && state.view === 'canvas') { state.camera.fitted = null; renderOverview(); } }, 150);
+    });
+  })();
+
+  // ---------- Project overview: header, health, canvas and list ----------
   function renderOverview() {
     const p = selectedProject();
     const selected = p?.jobs.find(job => job.job_id === state.agent) || null;
+    const filtered = p ? p.jobs.filter(job => job.job_id === state.agent || FILTERS[state.filter](job)) : [];
     $('project-count').textContent = state.projects.length;
+    renderSummary(); renderAttention();
     reconcile($('projects'), state.projects, item => item.id, item => {
       const button = node('button', null, 'project-button'); button.type = 'button';
       const title = node('div'); title.append(node('strong'), node('small'));
@@ -111,40 +370,49 @@
       button.setAttribute('aria-current', String(item.id === state.project));
       button.children[0].className = `dot ${tone(item)}`;
       button.querySelector('strong').textContent = item.name;
-      button.querySelector('small').textContent = item.question_count ? `${item.question_count} question${item.question_count === 1 ? '' : 's'} waiting` : item.active ? `${item.active} active · ${item.jobs.length} agents` : `${item.jobs.length} agents · history`;
+      button.querySelector('small').textContent = item.question_count ? tn('rail.questions', item.question_count) : item.active ? t('rail.active', { active: tn('count.active', item.active), agents: tn('count.agents', item.jobs.length) }) : t('rail.history', { agents: tn('count.agents', item.jobs.length) });
       button.querySelector('.count').textContent = item.jobs.length;
       button.title = `${item.name} · ${item.id}`;
     });
     renderAgentNavigation(p);
-    $('project-title').textContent = selected ? agentName(selected) : p ? p.name : 'Your projects';
+    $('project-title').textContent = selected ? agentName(selected) : p ? p.name : t('project.default');
     $('project-subtitle').textContent = selected
-      ? `${selected.current_work || selected.role || 'Agent work'} · ${p.name}`
-      : p ? `${p.jobs.length} agents · ${p.plans.length} plans · Updated ${ago(p.updated_at).toLowerCase()}` : 'Jobs and project feedback appear here when created.';
-    $('filter').disabled = Boolean(selected);
+      ? `${selected.current_work || selected.role || t('project.agentWork')} · ${p.name}`
+      : p ? t('project.summary', { agents: tn('count.agents', p.jobs.length), plans: tn('count.plans', p.plans.length), ago: ago(p.updated_at) }) : t('project.empty');
+    $('filter').disabled = state.view === 'list' && Boolean(selected);
+    $('filter').value = state.filter;
     const health = $('health'); health.replaceChildren();
     if (selected) {
-      const statusMetric = metric('Agent status', statusLabel(selected), selected.role || 'Worker');
+      const statusMetric = metric(t('health.agentStatus'), statusLabel(selected), selected.role || t('common.worker'));
       statusMetric.querySelector('strong').prepend(dot(tone(selected)));
-      health.append(statusMetric, metric('Current phase', label(selected.phase), selected.recent_message ? 'Progress reported' : 'No progress update'), metric('Elapsed', elapsed(selected.elapsed_seconds), selected.active ? 'Still running' : 'Latest run'), metric('Files changed', count(selected.changed_files), 'From recorded baseline'));
+      health.append(statusMetric, metric(t('health.phase'), raw(selected.phase || t('common.notReported')), selected.recent_message ? t('health.progressReported') : t('health.noProgress')), metric(t('health.elapsed'), elapsed(selected.elapsed_seconds), selected.active ? t('health.stillRunning') : t('health.latestRun')), metric(t('health.files'), count(selected.changed_files), t('health.fromBaseline')));
     } else if (p) {
-      const healthMetric = metric('Overall health', p.attention_required ? 'Question waiting' : p.active ? 'In progress' : p.completed ? 'History available' : 'No active jobs', `${p.active} active · ${p.question_count} questions`);
+      const healthMetric = metric(t('health.overall'), p.attention_required ? t('health.questionWaiting') : p.active ? t('health.inProgress') : p.completed ? t('health.historyAvailable') : t('health.noActive'), t('health.overallDetail', { active: tn('count.active', p.active), questions: tn('count.questions', p.question_count) }));
       healthMetric.querySelector('strong').prepend(dot(tone(p)));
       const total = p.jobs.length;
-      const progressMetric = metric('Review progress', total ? `${Math.round(p.completed / total * 100)}%` : '—', `${p.completed} of ${total} agents accepted`);
-      const progress = node('progress'); progress.max = total || 1; progress.value = p.completed; progress.setAttribute('aria-label', 'Agents accepted after review');
+      const progressMetric = metric(t('health.reviewProgress'), total ? `${Math.round(p.completed / total * 100)}%` : '—', t('health.acceptedOf', { done: p.completed, total }));
+      const progress = node('progress'); progress.max = total || 1; progress.value = p.completed; progress.setAttribute('aria-label', t('health.acceptedAria'));
       progressMetric.querySelector('strong').after(progress);
-      health.append(healthMetric, progressMetric, metric('Latest activity', ago(p.updated_at), 'Local durable state'), metric('Review queue', count(p.review_queue), `${p.failed} failed or scope-violating runs in history`));
+      health.append(healthMetric, progressMetric, metric(t('health.latestActivity'), ago(p.updated_at), t('health.localState')), metric(t('health.reviewQueue'), count(p.review_queue), tn('health.failedHistory', p.failed)));
     }
-    const rows = selected ? [selected] : p ? p.jobs.filter(j => state.filter === 'all' || state.filter === 'attention' && j.attention_required || state.filter === 'active' && j.active || state.filter === 'complete' && j.state === 'accepted') : [];
-    $('agents-heading').textContent = selected ? 'Selected agent work' : `Agents (${rows.length})`;
+    for (const [view, panel] of [['canvas', 'canvas-panel'], ['list', 'list-panel']]) {
+      $(panel).hidden = state.view !== view;
+      $(`view-${view}`).setAttribute('aria-pressed', String(state.view === view));
+    }
+    if (state.view === 'canvas') renderCanvas(p, filtered);
+    else renderList(p, selected, filtered);
+  }
+  function renderList(p, selected, filtered) {
+    const rows = selected ? [selected] : filtered;
+    $('agents-heading').textContent = selected ? t('table.selected') : t('table.heading', { n: rows.length });
     $('table-empty').hidden = rows.length > 0;
-    $('table-empty').textContent = !p ? 'No projects yet. Launch a job or request project feedback to get started.' : p.jobs.length ? 'No agents match this filter.' : 'No worker jobs in this project. Select Project overview to review its feedback.';
-    reconcile($('agents'), rows, j => j.job_id, j => {
+    $('table-empty').textContent = !p ? t('table.noProjects') : p.jobs.length ? t('table.noMatch') : t('table.noJobs');
+    reconcile($('agents'), rows, j => j.job_id, () => {
       const row = node('tr');
       for (let i = 0; i < 6; i++) row.append(node('td'));
       const button = node('button', null, 'agent-button'); button.type = 'button';
       button.append(dot('neutral'), node('span'));
-      button.addEventListener('click', () => selectAgent(j.job_id));
+      button.addEventListener('click', () => selectAgent(row.dataset.key));
       row.children[0].append(button, node('small'));
       for (let i = 1; i < 6; i++) row.children[i].append(node('span'), node('small'));
       row.children[5].className = 'state-cell';
@@ -156,17 +424,21 @@
       button.setAttribute('aria-pressed', String(j.job_id === state.agent));
       button.querySelector('.dot').className = `dot ${tone(j)}`;
       button.querySelector('span:last-child').textContent = agentName(j);
-      cells[0].querySelector('small').textContent = j.role || 'Worker';
-      const values = [[j.cli || 'Configured CLI', j.model || 'Configured model'], [j.current_work || 'No progress message yet', `${count(j.changed_files)} files · Usage ${j.usage ? 'reported' : 'unavailable'}`], [label(j.phase), j.recent_message ? 'Worker update' : 'Awaiting update'], [elapsed(j.elapsed_seconds), ''], [statusLabel(j), `Review: ${label(j.review_state)}`]];
+      cells[0].querySelector('small').textContent = j.role || t('common.worker');
+      const values = [[j.cli || t('common.configuredCli'), j.model || t('common.configuredModel')], [j.current_work || t('common.noProgress'), t('table.filesUsage', { files: filesText(j.changed_files), usage: j.usage ? t('table.usageReported') : t('table.usageUnavailable') })], [raw(j.phase || t('common.notReported')), j.recent_message ? t('table.workerUpdate') : t('common.awaitingUpdate')], [elapsed(j.elapsed_seconds), ''], [statusLabel(j), t('table.review', { state: st('review', j.review_state) })]];
       values.forEach(([primary, secondary], i) => { cells[i + 1].firstChild.textContent = primary; cells[i + 1].lastChild.textContent = secondary; });
       cells[5].firstChild.prepend(dot(tone(j)));
     });
+  }
+  function focusTarget(pid, job) {
+    $('notice').textContent = '';
+    state.project = pid; state.agent = job;
+    setTab('messages'); clearInspector(); renderOverview(); loadDetail();
   }
   function selectProject(id) {
     if (state.project === id) return;
     $('notice').textContent = '';
     state.project = id;
-    const p = selectedProject();
     state.agent = null;
     state.feedback = []; clearInspector(); renderOverview(); loadDetail();
   }
@@ -183,9 +455,9 @@
   function clearInspector() {
     state.generation++; state.detail = null;
     ['timeline', 'questions', 'history', 'summary', 'files', 'tests', 'usage', 'stdout', 'stderr'].forEach(id => $(id).replaceChildren());
-    $('detail-status').textContent = 'Loading local details…';
-    $('inspector-title').textContent = state.agent ? 'Loading agent…' : 'Project orchestrator';
-    $('inspector-subtitle').textContent = selectedProject()?.name || 'No project selected';
+    $('detail-status').textContent = t('inspector.loading');
+    $('inspector-title').textContent = state.agent ? t('inspector.loadingAgent') : t('inspector.coordinator');
+    $('inspector-subtitle').textContent = selectedProject()?.name || t('inspector.noProject');
   }
   function setTab(tab, focus = false) {
     state.tab = tab;
@@ -196,24 +468,31 @@
       if (active && focus) button.focus();
     }
   }
+
+  // ---------- Inspector ----------
+  function authorOf(event) {
+    return event.source === 'worker' ? t('author.worker') : event.source === 'orchestrator' ? t('author.coordinator') : t('author.runner');
+  }
   function renderTimeline(events) {
     $('timeline').replaceChildren();
-    if (!events.length) { $('timeline').append(node('li', 'No progress messages yet.', 'empty')); return; }
-    for (const event of events.slice(-8)) {
-      const item = node('li');
-      const content = node('div');
-      content.append(node('strong', label(event.phase || event.type)), node('p', event.message || event.question || (event.verdict ? `Review: ${label(event.verdict)}` : event.state ? label(event.state) : event.source === 'worker' ? 'Worker update' : 'Runner lifecycle event')));
-      item.append(node('time', when(event.at)), node('span', null, 'track'), content);
+    if (!events.length) { $('timeline').append(node('li', t('chat.empty'), 'empty')); return; }
+    for (const event of events.slice(-20)) {
+      const item = node('li', null, 'bubble'); item.dataset.source = event.source === 'worker' || event.source === 'orchestrator' ? event.source : 'runner';
+      const head = node('div', null, 'bubble-head');
+      // The worker-defined phase is shown verbatim; lifecycle events fall back to their translated type.
+      head.append(node('strong', authorOf(event)), node('span', event.phase ? raw(event.phase) : ''), node('time', when(event.at)));
+      const body = event.message || event.question || (event.verdict ? t('event.review', { verdict: st('verdict', event.verdict) }) : event.state ? st('state', event.state) : st('event', event.type));
+      item.append(head, node('p', body));
       $('timeline').append(item);
     }
   }
   function renderHistory(records) {
     const parent = $('history'); parent.replaceChildren();
     if (!records.length) return;
-    parent.append(node('h3', 'Answered & closed questions'));
+    parent.append(node('h3', t('history.title')));
     for (const record of [...records].reverse()) {
       const article = node('article');
-      article.append(node('small', `${record.source === 'orchestrator' ? 'Project orchestrator' : 'Worker'} · ${label(record.state)} · ${when(record.answered_at || record.expired_at || record.created_at)}`), node('p', record.question), node('p', record.answer || 'Closed without an answer.'));
+      article.append(node('small', t('history.meta', { source: record.source === 'orchestrator' ? t('question.sourceCoordinator') : t('common.worker'), state: st('state', record.state), time: when(record.answered_at || record.expired_at || record.created_at) })), node('p', record.question), node('p', record.answer || t('history.closed')));
       parent.append(article);
     }
   }
@@ -226,36 +505,36 @@
     const pendingKeys = new Set(records.map(questionRoute));
     // An answer from another tab never destroys a focused draft.
     const held = [...parent.children].filter(el => !pendingKeys.has(el.dataset.key) && el.contains(document.activeElement));
-    for (const el of held) { el.querySelector('button').disabled = true; el.querySelector('.result').textContent = 'This question is no longer pending. Your draft is preserved.'; }
+    for (const el of held) { el.querySelector('button').disabled = true; el.querySelector('.result').textContent = t('question.gone'); }
     const existing = new Map([...parent.children].map(el => [el.dataset.key, el]));
     for (const q of records) {
       const route = questionRoute(q);
       let form = existing.get(route);
       if (!form) {
         form = node('form', null, 'question'); form.dataset.key = route;
-        const header = node('div', null, 'question-header'); const heading = node('h3', 'Clarification needed'); heading.prepend(dot('amber'));
+        const header = node('div', null, 'question-header'); const heading = node('h3', t('question.heading')); heading.prepend(dot('amber'));
         header.append(heading, node('time', when(q.created_at)));
-        const source = `${q.source === 'orchestrator' ? 'Project orchestrator' : 'Worker · ' + ($('inspector-title').textContent)} · ${selectedProject()?.name || ''}`;
+        const source = `${q.source === 'orchestrator' ? t('question.sourceCoordinator') : t('question.sourceWorker', { agent: $('inspector-title').textContent })} · ${selectedProject()?.name || ''}`;
         const inputId = `answer-${q.source}-${q.id}`;
-        const inputLabel = node('label', 'Your answer'); inputLabel.htmlFor = inputId;
+        const inputLabel = node('label', t('question.answer')); inputLabel.htmlFor = inputId;
         const input = node('textarea'); input.id = inputId; input.name = 'answer'; input.required = true; input.maxLength = 60000;
         input.value = state.drafts.get(route) || '';
         input.addEventListener('input', () => state.drafts.set(route, input.value));
-        const submit = node('button', 'Send answer'); submit.type = 'submit';
+        const submit = node('button', t('question.send')); submit.type = 'submit';
         const result = node('p', '', 'result'); result.setAttribute('role', 'status');
         form.append(header, node('p', source, 'source-label'), node('p', q.question, 'question-text'));
         if (q.context) form.append(node('p', q.context, 'context'));
         form.append(inputLabel, input, submit, result);
         form.addEventListener('submit', async event => {
           event.preventDefault();
-          if (!input.value.trim()) { result.textContent = 'Enter an answer before sending.'; input.focus(); return; }
-          const answer = input.value; submit.disabled = true; result.textContent = 'Saving your answer…';
+          if (!input.value.trim()) { result.textContent = t('question.empty'); input.focus(); return; }
+          const answer = input.value; submit.disabled = true; result.textContent = t('question.saving');
           try {
             await api(route, answer); state.drafts.delete(route);
-            result.textContent = 'Answer saved. The agent can continue.'; input.readOnly = true;
-            $('notice').textContent = 'Answer saved locally.';
+            result.textContent = t('question.savedOk'); input.readOnly = true;
+            $('notice').textContent = t('question.savedNotice');
             // Keep the successful form visible and focused until the next deliberate selection.
-            form.dataset.answered = 'true'; form.querySelector('h3').textContent = 'Answer saved';
+            form.dataset.answered = 'true'; form.querySelector('h3').textContent = t('question.saved');
             await refresh();
           } catch (error) { result.textContent = error.message; submit.disabled = false; }
         });
@@ -268,32 +547,32 @@
   function renderInspector() {
     const p = selectedProject(); const j = state.detail;
     const isWorker = Boolean(state.agent);
-    $('inspector-title').textContent = j ? agentName(j) : 'Project orchestrator';
+    $('inspector-title').textContent = j ? agentName(j) : t('inspector.coordinator');
     $('inspector-title').prepend(dot(j ? tone(j) : p?.pending_feedback.length ? 'amber' : 'neutral'));
-    $('inspector-subtitle').textContent = `${j?.role || (isWorker ? 'Worker' : 'Project decisions')} · ${p?.name || ''}`;
+    $('inspector-subtitle').textContent = `${j?.role || (isWorker ? t('common.worker') : t('inspector.projectDecisions'))} · ${p?.name || ''}`;
     $('local-logs').hidden = !j;
     $('detail-status').textContent = '';
     if (j) {
       renderTimeline(j.events);
-      const filePanel = $('files'); filePanel.replaceChildren(node('p', j.files === null ? 'Changed files unavailable for this workspace.' : `${j.files.length} changed files relative to the recorded baseline.`));
+      const filePanel = $('files'); filePanel.replaceChildren(node('p', j.files === null ? t('files.unavailable') : tn('files.count', j.files.length)));
       if (j.files?.length) { const list = node('ul'); j.files.forEach(file => list.append(node('li', file))); filePanel.append(list); }
-      const tests = $('tests'); tests.replaceChildren(node('p', `Review: ${label(j.review_state)}`));
+      const tests = $('tests'); tests.replaceChildren(node('p', t('tests.review', { state: st('review', j.review_state) })));
       const evidence = j.review?.tests || [];
-      if (evidence.length) { const list = node('ul'); evidence.forEach(test => list.append(node('li', test))); tests.append(list, node('p', `Recorded by ${j.review.reviewer} · ${when(j.review.reviewed_at)}`, 'muted')); }
-      else tests.append(node('p', 'No independent test evidence recorded. Test counts are not inferred from logs.', 'muted'));
-      const usage = $('usage'); usage.replaceChildren(node('p', j.usage ? 'Latest provider-reported snapshot. This may not represent cumulative usage.' : 'Usage is unavailable. This CLI has not reported token or cost data.', 'muted'));
-      if (j.usage) { const list = node('dl'); Object.entries(j.usage).filter(([key]) => key !== 'provider_reported').forEach(([key, value]) => list.append(node('dt', label(key)), node('dd', count(value)))); usage.append(list); }
-      $('stdout').textContent = j.logs.stdout || 'No output yet.'; $('stderr').textContent = j.logs.stderr || 'No errors reported.';
+      if (evidence.length) { const list = node('ul'); evidence.forEach(test => list.append(node('li', test))); tests.append(list, node('p', t('tests.recorded', { reviewer: j.review.reviewer, time: when(j.review.reviewed_at) }), 'muted')); }
+      else tests.append(node('p', t('tests.none'), 'muted'));
+      const usage = $('usage'); usage.replaceChildren(node('p', j.usage ? t('usage.reported') : t('usage.none'), 'muted'));
+      if (j.usage) { const list = node('dl'); Object.entries(j.usage).filter(([key]) => key !== 'provider_reported').forEach(([key, value]) => list.append(node('dt', st('usage', key)), node('dd', count(value)))); usage.append(list); }
+      $('stdout').textContent = j.logs.stdout || t('logs.noOutput'); $('stderr').textContent = j.logs.stderr || t('logs.noErrors');
       renderQuestions(j.questions.filter(q => q.state === 'pending').map(q => ({ ...q, source: 'worker' })));
       renderHistory(j.questions.filter(q => q.state !== 'pending'));
-      const head = node('div', null, 'summary-head'); head.append(node('h3', 'Summary'), node('small', `Elapsed ${elapsed(j.elapsed_seconds)}`));
+      const head = node('div', null, 'summary-head'); head.append(node('h3', t('summary.title')), node('small', t('summary.elapsed', { time: elapsed(j.elapsed_seconds) })));
       const grid = node('div', null, 'summary-grid');
       const tokens = j.usage?.total_tokens ?? (j.usage?.input_tokens !== undefined && j.usage?.output_tokens !== undefined ? j.usage.input_tokens + j.usage.output_tokens : null);
-      grid.append(metric('Files changed', count(j.changed_files), 'From baseline'), metric('Test evidence', evidence.length || '—', evidence.length ? 'Review records' : 'Not reported'), metric('Token usage', count(tokens), j.usage?.total_cost_usd !== undefined ? `$${j.usage.total_cost_usd}` : 'Cost unavailable'));
+      grid.append(metric(t('summary.files'), count(j.changed_files), t('summary.fromBaseline')), metric(t('summary.tests'), evidence.length || '—', evidence.length ? t('summary.reviewRecords') : t('summary.notReported')), metric(t('summary.tokens'), count(tokens), j.usage?.total_cost_usd !== undefined ? `$${j.usage.total_cost_usd}` : t('summary.costUnavailable')));
       $('summary').replaceChildren(head, grid);
     } else {
-      $('timeline').replaceChildren(node('li', p?.pending_feedback.length ? 'The project orchestrator is waiting for your input.' : 'No pending orchestrator questions.', 'empty'));
-      for (const id of ['files', 'tests', 'usage']) $(id).replaceChildren(node('p', 'Select a worker agent to inspect these details.', 'muted'));
+      $('timeline').replaceChildren(node('li', p?.pending_feedback.length ? t('chat.waitingCoordinator') : t('chat.noQuestions'), 'empty'));
+      for (const id of ['files', 'tests', 'usage']) $(id).replaceChildren(node('p', t('files.select'), 'muted'));
       renderQuestions(p?.pending_feedback || []); renderHistory(state.feedback);
       $('summary').replaceChildren();
     }
@@ -301,7 +580,7 @@
   async function loadDetail() {
     const generation = ++state.generation;
     const project = state.project; const agent = state.agent;
-    if (!project) { clearInspector(); $('detail-status').textContent = 'Select a project to begin.'; return; }
+    if (!project) { clearInspector(); $('detail-status').textContent = t('inspector.selectProject'); return; }
     try {
       const data = await api(`/api/projects/${project}${agent ? '/jobs/' + agent : ''}`);
       if (generation !== state.generation) return;
@@ -309,6 +588,11 @@
       else { state.detail = null; state.feedback = data.feedback_history; const p = selectedProject(); if (p) p.pending_feedback = data.pending_feedback; }
       renderInspector();
     } catch (error) { if (generation === state.generation) $('detail-status').textContent = error.message; }
+  }
+  function setConnection(color, key) { $('connection').replaceChildren(dot(color), document.createTextNode(t(key))); }
+  function setRefreshText() {
+    $('refresh-status').textContent = state.paused ? t('refresh.paused') : t('refresh.every');
+    $('pause').textContent = state.paused ? t('refresh.resume') : t('refresh.pause');
   }
   async function refresh() {
     if (state.refreshing) return;
@@ -323,20 +607,24 @@
         state.agent = null; clearInspector();
       }
       renderOverview(); await loadDetail();
-      $('connection').replaceChildren(dot('green'), document.createTextNode(state.paused ? 'Refresh paused' : 'Connected locally'));
-      $('refresh-status').textContent = state.paused ? 'Auto-refresh paused' : 'Refreshes every 2 seconds';
-      if (data.unreadable_records) $('notice').textContent = `${data.unreadable_records} unreadable local records were skipped.`;
+      setConnection(state.paused ? 'neutral' : 'green', state.paused ? 'connection.paused' : 'connection.ok');
+      setRefreshText();
+      if (data.unreadable_records) $('notice').textContent = tn('notice.unreadable', data.unreadable_records);
     } catch (error) {
       $('notice').textContent = error.message;
-      $('connection').replaceChildren(dot('amber'), document.createTextNode('Connection unavailable'));
+      setConnection('amber', 'connection.lost');
     } finally { state.refreshing = false; }
   }
+  function setView(view) {
+    if (state.view === view) return;
+    state.view = view; state.camera.fitted = null; renderOverview();
+  }
+  $('view-canvas').addEventListener('click', () => setView('canvas'));
+  $('view-list').addEventListener('click', () => setView('list'));
   $('filter').addEventListener('change', event => { state.filter = event.target.value; renderOverview(); });
   $('pause').addEventListener('click', () => {
     state.paused = !state.paused; $('pause').setAttribute('aria-pressed', String(state.paused));
-    $('pause').textContent = state.paused ? 'Resume refresh' : 'Pause refresh';
-    $('refresh-status').textContent = state.paused ? 'Auto-refresh paused' : 'Refreshes every 2 seconds';
-    $('connection').replaceChildren(dot(state.paused ? 'neutral' : 'green'), document.createTextNode(state.paused ? 'Refresh paused' : 'Connected locally'));
+    setRefreshText(); setConnection(state.paused ? 'neutral' : 'green', state.paused ? 'connection.paused' : 'connection.ok');
     if (!state.paused) refresh();
   });
   $('show-messages').addEventListener('click', () => setTab('messages', true));
@@ -348,7 +636,10 @@
       if (target !== null) { event.preventDefault(); setTab(tabs[target].dataset.tab, true); }
     });
   });
-  function updateClock() { $('clock').textContent = new Date().toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' }) + '\n' + when(new Date().toISOString()); }
+  function updateClock() { $('clock').textContent = `${dateLong(new Date())} · ${when(new Date().toISOString())}`; }
+  clearInspector(); setRefreshText(); setConnection('blue', 'connection.connecting');
+  $('project-title').textContent = t('project.default'); $('project-subtitle').textContent = t('project.connecting');
+  $('agent-navigation-empty').textContent = t('agents.select');
   updateClock(); refresh();
   setInterval(() => { updateClock(); if (!state.paused) refresh(); }, 2000);
 })();

@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- Redesign the local dashboard as a control center: a global status summary, an attention tray for
+  worker questions and pending reviews, and a pannable, zoomable canvas that draws project, plan,
+  and job relationships only from recorded data, with an equivalent accessible list view.
+- Make Spanish the default interface language through a central dictionary (`web/i18n.js`).
+  Runner records, worker messages, logs, file paths, IDs, and unknown identifiers stay verbatim.
+- Present the inspector timeline as a conversation and keep selection, focus, camera position, and
+  answer drafts stable across the two-second refresh.
+- Serve a dedicated favicon and the new `i18n.js` through the existing exact-path static allowlist;
+  the loopback-only boundary, token authentication, and CSP are unchanged.
+- Add tests that every interface string key and every runner state or event has a Spanish label,
+  and that animation stays on `transform`/`opacity`.
+
 ## 0.7.1 - 2026-09-14
 
 - Treat an explicit Agent Orchestrator invocation as a request for a native Codex persistent goal,
