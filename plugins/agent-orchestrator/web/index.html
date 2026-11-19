@@ -8,6 +8,7 @@
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/styles.css">
   <script src="/i18n.js" defer></script>
+  <script src="/actions.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
@@ -65,6 +66,7 @@
           <option value="failed" data-i18n="filter.failed"></option>
           <option value="complete" data-i18n="filter.complete"></option>
         </select>
+        <button id="new-plan" type="button" data-i18n="plan.new" hidden></button>
         <span id="refresh-status" class="muted"></span>
       </div>
       <section id="canvas-panel">
@@ -92,13 +94,17 @@
     </main>
     <aside class="inspector" data-i18n-aria="inspector.label">
       <header class="inspector-header"><div><h2 id="inspector-title"></h2><p id="inspector-subtitle" class="muted"></p></div><button id="show-messages" type="button" data-i18n="inspector.messagesButton"></button></header>
+      <div id="actions" class="actions" role="group" data-i18n-aria="actions.label" hidden></div>
+      <p id="detail-status" class="muted" role="status"></p>
+      <section id="plans-list" class="plans-list" data-i18n-aria="plan.listLabel" hidden></section>
+      <section id="plan-detail" class="plan-detail" data-i18n-aria="plan.detailLabel" hidden></section>
+      <div id="agent-sections">
       <div class="tabs" role="tablist" data-i18n-aria="inspector.tabs">
         <button type="button" role="tab" id="tab-messages" aria-controls="panel-messages" aria-selected="true" data-tab="messages" data-i18n="tab.messages"></button>
         <button type="button" role="tab" id="tab-files" aria-controls="panel-files" aria-selected="false" tabindex="-1" data-tab="files" data-i18n="tab.files"></button>
         <button type="button" role="tab" id="tab-tests" aria-controls="panel-tests" aria-selected="false" tabindex="-1" data-tab="tests" data-i18n="tab.tests"></button>
         <button type="button" role="tab" id="tab-usage" aria-controls="panel-usage" aria-selected="false" tabindex="-1" data-tab="usage" data-i18n="tab.usage"></button>
       </div>
-      <p id="detail-status" class="muted" role="status"></p>
       <section id="panel-messages" role="tabpanel" aria-labelledby="tab-messages"><ol id="timeline" class="timeline"></ol></section>
       <section id="panel-files" role="tabpanel" aria-labelledby="tab-files" hidden><div id="files"></div></section>
       <section id="panel-tests" role="tabpanel" aria-labelledby="tab-tests" hidden><div id="tests"></div></section>
@@ -107,7 +113,108 @@
       <section id="summary" class="summary" data-i18n-aria="summary.agentLabel"></section>
       <section id="history" data-i18n-aria="history.label"></section>
       <details id="local-logs"><summary data-i18n="logs.title"></summary><p class="muted" data-i18n="logs.help"></p><h3 data-i18n="logs.stdout"></h3><pre id="stdout"></pre><h3 data-i18n="logs.stderr"></h3><pre id="stderr"></pre></details>
+      </div>
     </aside>
   </div>
+  <dialog id="dlg-review" aria-labelledby="dlg-review-title">
+    <form id="form-review" class="dialog-form" novalidate>
+      <header><h2 id="dlg-review-title" data-i18n="review.title"></h2><button type="button" class="close" data-close data-i18n-aria="dialog.close">&times;</button></header>
+      <p class="muted" data-i18n="review.help"></p>
+      <fieldset><legend data-i18n="review.verdict"></legend>
+        <label class="choice"><input type="radio" name="verdict" value="accepted"><span data-i18n="verdict.accepted"></span></label>
+        <label class="choice"><input type="radio" name="verdict" value="repair_required"><span data-i18n="verdict.repair_required"></span></label>
+        <label class="choice"><input type="radio" name="verdict" value="rejected"><span data-i18n="verdict.rejected"></span></label>
+      </fieldset>
+      <label for="review-tests" data-i18n="review.tests"></label>
+      <textarea id="review-tests" name="tests" rows="3" maxlength="20000"></textarea>
+      <small class="muted" data-i18n="review.testsHelp"></small>
+      <label for="review-notes" data-i18n="review.notes"></label>
+      <textarea id="review-notes" name="notes" rows="4" maxlength="20000"></textarea>
+      <div class="form-error" role="alert"></div>
+      <footer><button type="button" data-close data-i18n="dialog.cancel"></button><button type="submit" class="primary" data-i18n="review.submit"></button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="dlg-cancel" aria-labelledby="dlg-cancel-title">
+    <form id="form-cancel" class="dialog-form" novalidate>
+      <header><h2 id="dlg-cancel-title" data-i18n="cancel.title"></h2><button type="button" class="close" data-close data-i18n-aria="dialog.close">&times;</button></header>
+      <p data-i18n="cancel.help"></p>
+      <label class="choice"><input type="checkbox" name="force"><span data-i18n="cancel.force"></span></label>
+      <div class="form-error" role="alert"></div>
+      <footer><button type="button" data-close data-i18n="dialog.keep"></button><button type="submit" class="danger" data-i18n="cancel.submit"></button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="dlg-plan" aria-labelledby="dlg-plan-title">
+    <form id="form-plan" class="dialog-form wide" novalidate>
+      <header><h2 id="dlg-plan-title" data-i18n="plan.createTitle"></h2><button type="button" class="close" data-close data-i18n-aria="dialog.close">&times;</button></header>
+      <p class="muted" data-i18n="plan.createHelp"></p>
+      <label for="plan-title" data-i18n="plan.fieldTitle"></label>
+      <input id="plan-title" name="title" type="text" maxlength="200">
+      <label for="plan-goal" data-i18n="plan.fieldGoal"></label>
+      <textarea id="plan-goal" name="goal" rows="3" maxlength="5000"></textarea>
+      <label for="plan-checklist" data-i18n="plan.fieldChecklist"></label>
+      <textarea id="plan-checklist" name="checklist" rows="5" maxlength="20000"></textarea>
+      <small class="muted" data-i18n="plan.checklistHelp"></small>
+      <div class="grid-2">
+        <div><label for="plan-strategy" data-i18n="plan.fieldStrategy"></label><select id="plan-strategy" name="strategy"></select></div>
+        <div><label for="plan-risk" data-i18n="plan.fieldRisk"></label><select id="plan-risk" name="risk"></select></div>
+        <div><label for="plan-type" data-i18n="plan.fieldType"></label><select id="plan-type" name="task_type"></select></div>
+        <div><label for="plan-topology" data-i18n="plan.fieldTopology"></label><select id="plan-topology" name="topology"></select></div>
+      </div>
+      <label for="plan-parallel" data-i18n="plan.fieldParallel"></label>
+      <input id="plan-parallel" name="max_parallel" type="number" min="1" max="8" value="3">
+      <label for="plan-executors" data-i18n="plan.fieldExecutors"></label>
+      <textarea id="plan-executors" name="executors" rows="2" maxlength="2000"></textarea>
+      <small class="muted" id="plan-executors-help" data-i18n="plan.executorsHelp"></small>
+      <div class="add-executor"><select id="plan-harness" aria-labelledby="plan-executors-help"></select><input id="plan-model" type="text" maxlength="128" data-i18n-aria="plan.modelLabel" data-i18n-placeholder="plan.modelPlaceholder"><button type="button" id="plan-add-executor" data-i18n="plan.addExecutor"></button></div>
+      <details>
+        <summary data-i18n="plan.advanced"></summary>
+        <label for="plan-expensive" data-i18n="plan.fieldExpensive"></label>
+        <textarea id="plan-expensive" name="expensive_executors" rows="2" maxlength="1000"></textarea>
+        <small class="muted" data-i18n="plan.expensiveHelp"></small>
+        <label for="plan-decisions" data-i18n="plan.fieldDecisions"></label>
+        <textarea id="plan-decisions" name="decisions" rows="2" maxlength="5000"></textarea>
+        <label for="plan-constraints" data-i18n="plan.fieldConstraints"></label>
+        <textarea id="plan-constraints" name="constraints" rows="2" maxlength="5000"></textarea>
+        <label for="plan-validation" data-i18n="plan.fieldValidation"></label>
+        <textarea id="plan-validation" name="validation" rows="2" maxlength="5000"></textarea>
+        <label for="plan-completion" data-i18n="plan.fieldCompletion"></label>
+        <textarea id="plan-completion" name="completion" rows="2" maxlength="5000"></textarea>
+        <small class="muted" data-i18n="plan.defaultsHelp"></small>
+      </details>
+      <div class="form-error" role="alert"></div>
+      <footer><button type="button" data-close data-i18n="dialog.cancel"></button><button type="submit" class="primary" data-i18n="plan.submit"></button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="dlg-launch" aria-labelledby="dlg-launch-title">
+    <form id="form-launch" class="dialog-form wide" novalidate>
+      <header><h2 id="dlg-launch-title"></h2><button type="button" class="close" data-close data-i18n-aria="dialog.close">&times;</button></header>
+      <p class="muted" id="launch-item"></p>
+      <label for="launch-executor" data-i18n="launch.executor"></label>
+      <select id="launch-executor" name="executor"></select>
+      <small class="muted" id="launch-executor-help"></small>
+      <label for="launch-task" data-i18n="launch.task"></label>
+      <textarea id="launch-task" name="task" rows="14" class="mono" spellcheck="false"></textarea>
+      <small class="muted" data-i18n="launch.taskHelp"></small>
+      <div class="grid-2">
+        <div><label for="launch-role" data-i18n="launch.role"></label><input id="launch-role" name="role" type="text" maxlength="128"></div>
+        <div><label for="launch-cost" data-i18n="launch.maxCost"></label><input id="launch-cost" name="max_cost_usd" type="number" min="0.01" step="0.01"></div>
+        <div><label for="launch-timeout" data-i18n="launch.timeout"></label><input id="launch-timeout" name="timeout_seconds" type="number" min="30" max="86400" value="3600"></div>
+        <div><label for="launch-allow" data-i18n="launch.allowPaths"></label><textarea id="launch-allow" name="allow_paths" rows="2"></textarea></div>
+      </div>
+      <details>
+        <summary data-i18n="launch.advanced"></summary>
+        <label for="launch-deny" data-i18n="launch.denyPaths"></label>
+        <textarea id="launch-deny" name="deny_paths" rows="2"></textarea>
+        <label class="choice"><input type="checkbox" name="allow_dirty"><span data-i18n="launch.allowDirty"></span></label>
+        <label class="choice"><input type="checkbox" name="allow_concurrent_workspace"><span data-i18n="launch.allowConcurrent"></span></label>
+      </details>
+      <label class="choice confirm"><input type="checkbox" name="confirm"><span id="launch-confirm-text"></span></label>
+      <div class="form-error" role="alert"></div>
+      <footer><button type="button" data-close data-i18n="dialog.cancel"></button><button type="submit" class="primary" data-i18n="launch.submit"></button></footer>
+    </form>
+  </dialog>
 </body>
 </html>

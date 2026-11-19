@@ -331,7 +331,7 @@ class DashboardTests(unittest.TestCase):
         self.assertNotIn(str(self.root), json.dumps(canonical_project))
 
     def test_static_allowlist_and_security_headers(self):
-        for path in ("/", "/index.html", "/styles.css", "/i18n.js", "/favicon.svg", "/app.js"):
+        for path in ("/", "/index.html", "/styles.css", "/i18n.js", "/favicon.svg", "/actions.js", "/app.js"):
             status, headers, _ = self.request(path, authenticated=False)
             self.assertEqual(status, 200, path)
             self.assertEqual(headers["Cache-Control"], "no-store")
@@ -373,25 +373,30 @@ class DashboardTests(unittest.TestCase):
     def test_interface_is_spanish_with_a_central_dictionary(self):
         web = SCRIPTS.parent / "web"
         html = (web / "index.html").read_text()
-        script = (web / "app.js").read_text()
+        script = (web / "app.js").read_text() + "\n" + (web / "actions.js").read_text()
         dictionary = (web / "i18n.js").read_text()
         self.assertIn('<html lang="es">', html)
-        # The i18n script must load before the app that destructures window.I18N.
-        self.assertLess(html.index("/i18n.js"), html.index("/app.js"))
-        defined = set(re.findall(r"^\s*'([\w.]+)':", dictionary, re.M))
-        used = set(re.findall(r"\bt\('([\w.]+)'", script))
-        used |= set(re.findall(r'data-i18n(?:-aria|-title)?="([\w.]+)"', html))
-        plural_bases = set(re.findall(r"\btn\('([\w.]+)'", script))
+        # The i18n script must load before the scripts that destructure window.I18N.
+        self.assertLess(html.index("/i18n.js"), html.index("/actions.js"))
+        self.assertLess(html.index("/actions.js"), html.index("/app.js"))
+        defined = set(re.findall(r"^\s*'([\w.-]+)':", dictionary, re.M))
+        used = set(re.findall(r"\bt\('([\w.-]+)'", script))
+        used |= set(re.findall(r'data-i18n(?:-aria|-title|-placeholder)?="([\w.-]+)"', html))
+        plural_bases = set(re.findall(r"\btn\('([\w.-]+)'", script))
         for base in plural_bases:
             used |= {f"{base}.one", f"{base}.other"}
         # Keys chosen at run time: t(`attention.${kind}`), setConnection(color, key), errorKeys.
         groups = {key.split(".")[0] for key in defined}
         used |= {
             literal
-            for literal in re.findall(r"'([a-z]+\.[a-zA-Z_]+)'", script)
+            for literal in re.findall(r"'([a-z]+(?:\.[a-zA-Z_0-9-]+)+)'", script)
             if literal.split(".")[0] in groups
         }
         used |= {"attention.question", "attention.review"}
+        used |= {
+            f"launch.hint.{name}"
+            for name in ("objective", "why", "scope", "files", "guidance", "constraints", "acceptance", "validation", "report")
+        }
         used -= plural_bases  # Only their .one / .other forms exist.
         self.assertEqual(sorted(used - defined), [])
         # Every execution, acceptance and review state the runner can emit has a label.
@@ -412,6 +417,15 @@ class DashboardTests(unittest.TestCase):
         ):
             self.assertIn(f"event.{event}", defined, event)
         self.assertIn("state.terra_fallback_started", defined)
+        # Enumerations the engine accepts, plan item states, and the fields a request can reject.
+        for value in (*jobs.STRATEGIES, *jobs.RISKS, *jobs.TASK_TYPES, *jobs.EXECUTION_TOPOLOGIES,
+                      "pending", "in_progress", "done", "blocked"):
+            self.assertIn(f"plan.{value}", defined, value)
+        for field in ("title", "goal", "checklist", "decisions", "constraints", "validation", "completion",
+                      "strategy", "risk", "task_type", "topology", "max_parallel", "executors",
+                      "expensive_executors", "tests", "notes", "verdict", "cli", "model", "task", "confirm",
+                      "role", "timeout_seconds", "max_cost_usd", "allow_paths", "deny_paths", "force", "body"):
+            self.assertIn(f"field.{field}", defined, field)
 
     def test_canvas_only_animates_compositor_properties(self):
         styles = (SCRIPTS.parent / "web" / "styles.css").read_text()

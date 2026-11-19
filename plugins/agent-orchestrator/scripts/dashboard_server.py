@@ -15,6 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import cli_agent_job as jobs
+import panel_actions
 from agent_transcript import read_transcript
 
 WEB_ROOT = Path(__file__).resolve().parents[1] / "web"
@@ -24,9 +25,11 @@ STATIC = {
     "/styles.css": ("styles.css", "text/css; charset=utf-8"),
     "/i18n.js": ("i18n.js", "text/javascript; charset=utf-8"),
     "/favicon.svg": ("favicon.svg", "image/svg+xml"),
+    "/actions.js": ("actions.js", "text/javascript; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
 }
 MAX_BODY = 65536
+MAX_ACTION_BODY = 262144
 ETAG_RE = re.compile(r"[0-9a-z-]{1,64}")
 ACTIVE = {"starting", "running", "needs_input", "cancelling"}
 FAILURE = {"failed", "lost", "scope_violated", "timed_out"}
@@ -393,6 +396,60 @@ class DashboardState:
             },
         }
 
+    def project_workspace(self, pid: str) -> str:
+        """Resolve a project ID to a workspace path from durable records; paths never reach clients."""
+        jobs.validate_identifier(pid, "project")
+        records = [
+            jobs.read_json(path)
+            for pattern, root in (("*/meta.json", jobs.jobs_dir()), ("*/plan.json", jobs.plans_dir()))
+            for path in sorted(root.glob(pattern))
+        ] + list(jobs.read_feedback())
+        for record in records:
+            workspace = record.get("workspace")
+            if isinstance(workspace, str) and workspace and project_id(workspace) == pid:
+                return workspace
+        raise jobs.RunnerError("Unknown project ID")
+
+    def verified_plan(self, pid: str, plan_id: str) -> tuple[Path, dict]:
+        jobs.validate_identifier(pid, "project")
+        if not jobs.JOB_ID_RE.fullmatch(plan_id):
+            raise jobs.RunnerError("Invalid plan ID")
+        path, plan = jobs.read_plan(plan_id)
+        if project_id(plan["workspace"]) != pid:
+            raise jobs.RunnerError("Unknown plan in this project")
+        return path, plan
+
+    def plan(self, pid: str, plan_id: str) -> dict:
+        return panel_actions.plan_view(self.verified_plan(pid, plan_id)[1])
+
+    def launch_template(self, pid: str, job_id: str) -> dict:
+        return panel_actions.launch_template(self.verify_job(pid, job_id))
+
+    def act(self, parts: list[str], body: dict) -> dict:
+        """Dispatch a state-changing request. The engine itself enforces every policy."""
+        if len(parts) < 4 or parts[:2] != ["api", "projects"]:
+            raise jobs.RunnerError("Unknown action route")
+        pid = parts[2]
+        if len(parts) == 6 and parts[3] == "jobs" and parts[5] in {"cancel", "review"}:
+            self.verify_job(pid, parts[4])
+            if parts[5] == "cancel":
+                return panel_actions.cancel_job(parts[4], body)
+            review = panel_actions.review_job(parts[4], body)
+            return {key: review.get(key) for key in ("review_id", "verdict", "reviewer", "reviewed_at", "tests", "notes")}
+        if len(parts) == 4 and parts[3] == "plans":
+            return panel_actions.plan_view(panel_actions.create_plan(self.project_workspace(pid), body))
+        if len(parts) == 8 and parts[3] == "plans" and parts[5] == "items" and parts[7] == "launch":
+            _, plan = self.verified_plan(pid, parts[4])
+            if not any(item.get("id") == parts[6] for item in plan.get("items", [])):
+                raise jobs.RunnerError("Unknown checklist item")
+            launched = panel_actions.launch_item(plan["workspace"], parts[4], parts[6], body)
+            return {
+                key: launched.get(key)
+                for key in ("job_id", "cli", "model", "state", "role", "group", "plan_id",
+                            "checklist_item", "review_state", "executor_approval")
+            }
+        raise jobs.RunnerError("Unknown action route")
+
     def transcript(self, pid: str, job_id: str, etag: str | None) -> dict:
         """Bounded conversation extracted from stdout.log; cached by (size, mtime) so polling stays cheap."""
         log = self.verify_job(pid, job_id) / "stdout.log"
@@ -559,6 +616,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 )
             elif self.path == "/api/overview":
                 data = self.server.state.overview()
+            elif self.path == "/api/executors":
+                data = panel_actions.executor_catalog()
+            elif (
+                len(parts) == 5
+                and parts[:2] == ["api", "projects"]
+                and parts[3] == "plans"
+            ):
+                data = self.server.state.plan(parts[2], parts[4])
+            elif (
+                len(parts) == 6
+                and parts[:2] == ["api", "projects"]
+                and parts[3] == "jobs"
+                and parts[5] == "launch-template"
+            ):
+                data = self.server.state.launch_template(parts[2], parts[4])
             elif len(parts) == 3 and parts[:2] == ["api", "projects"]:
                 data = self.server.state.project(parts[2])
             elif (
@@ -571,6 +643,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.respond(404, {"error": "Not found"})
                 return
             self.respond(200, data)
+        except panel_actions.ActionError as exc:
+            self.respond(exc.status, exc.payload())
         except (jobs.RunnerError, KeyError, ValueError, TypeError, OSError):
             self.respond(
                 404,
@@ -597,9 +671,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
         ):
             self.respond(400, {"error": "A single Content-Length is required"})
             return
+        parts = self.path.strip("/").split("/")
+        is_answer = (
+            parts[:2] == ["api", "projects"]
+            and (
+                (len(parts) == 8 and parts[3] == "jobs" and parts[5] == "questions" and parts[7] == "answer")
+                or (len(parts) == 6 and parts[3] == "feedback" and parts[5] == "answer")
+            )
+        )
+        if "?" in self.path:
+            self.respond(404, {"error": "Not found"})
+            return
         length = int(lengths[0])
-        if length > MAX_BODY:
-            self.respond(413, {"error": "JSON body exceeds 64 KiB"})
+        limit = MAX_BODY if is_answer else MAX_ACTION_BODY
+        if length > limit:
+            self.respond(413, {"error": f"JSON body exceeds {limit // 1024} KiB"})
             return
         try:
 
@@ -614,23 +700,32 @@ class DashboardHandler(BaseHTTPRequestHandler):
             body = json.loads(
                 self.rfile.read(length).decode("utf-8"), object_pairs_hook=unique_object
             )
-            if (
-                not isinstance(body, dict)
-                or set(body) != {"answer"}
+            if not isinstance(body, dict):
+                raise ValueError("Expected a JSON object")
+            if is_answer and (
+                set(body) != {"answer"}
                 or not isinstance(body["answer"], str)
                 or not body["answer"].strip()
             ):
                 raise ValueError("Expected only a nonempty answer string")
         except (ValueError, UnicodeError, TimeoutError):
-            self.respond(
-                400, {"error": "Expected JSON with one nonempty answer string"}
-            )
+            if is_answer:
+                self.respond(
+                    400, {"error": "Expected JSON with one nonempty answer string"}
+                )
+            else:
+                self.respond(
+                    400, {"error": "Expected a JSON object", "code": "invalid_request"}
+                )
             return
         try:
-            result = self.server.state.answer(
-                self.path.strip("/").split("/"), body["answer"]
-            )
+            if is_answer:
+                result = self.server.state.answer(parts, body["answer"])
+            else:
+                result = self.server.state.act(parts, body)
             self.respond(200, result)
+        except panel_actions.ActionError as exc:
+            self.respond(exc.status, exc.payload())
         except jobs.RunnerError as exc:
             if "not pending" in str(exc):
                 self.respond(
@@ -647,7 +742,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except (OSError, KeyError, ValueError):
             self.respond(
                 500,
-                {"error": "Could not save the local answer. Refresh before retrying."},
+                {"error": "Could not save the local record. Refresh before retrying."},
             )
 
 

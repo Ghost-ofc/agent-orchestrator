@@ -22,7 +22,7 @@
   };
   const state = { projects: [], project: null, agent: null, tab: 'messages', paused: false,
     filter: 'all', view: matchMedia('(max-width: 720px)').matches ? 'list' : 'canvas',
-    generation: 0, refreshing: false, detail: null, transcript: null, followed: null, feedback: [], drafts: new Map(),
+    generation: 0, refreshing: false, detail: null, transcript: null, followed: null, plan: null, planDetail: null, pendingPlan: null, pendingJob: null, feedback: [], drafts: new Map(),
     camera: { x: 32, y: 32, k: 1, fitted: null, touched: false }, world: { w: 0, h: 0 } };
   let token = new URLSearchParams(location.hash.slice(1)).get('token');
   // The launch capability stays in this tab, never in URLs sent to the server or localStorage.
@@ -36,22 +36,35 @@
   for (const el of document.querySelectorAll('[data-i18n]')) el.textContent = t(el.dataset.i18n);
   for (const el of document.querySelectorAll('[data-i18n-aria]')) el.setAttribute('aria-label', t(el.dataset.i18nAria));
   for (const el of document.querySelectorAll('[data-i18n-title]')) el.title = t(el.dataset.i18nTitle);
+  for (const el of document.querySelectorAll('[data-i18n-placeholder]')) el.placeholder = t(el.dataset.i18nPlaceholder);
 
+  // A failed request carries what the server said: a stable code, the offending field, and (for engine
+  // rejections) the engine's own text, which is shown verbatim next to a Spanish explanation.
+  class ApiError extends Error {
+    constructor(message, info = {}) { super(message); Object.assign(this, info); }
+  }
   const errorKeys = { 400: 'err.badAnswer', 401: 'err.auth', 403: 'err.boundary', 404: 'err.notFound', 409: 'err.notPending', 413: 'err.tooLarge' };
-  async function api(path, answer) {
+  async function api(path, body) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 15000);
+    // Reads stay short so a stuck poll cannot freeze the refresh; actions may wait for the engine.
+    const timeout = setTimeout(() => controller.abort(), body === undefined ? 15000 : 90000);
     try {
-      const response = await fetch(path, { signal: controller.signal, method: answer === undefined ? 'GET' : 'POST',
+      const response = await fetch(path, { signal: controller.signal, method: body === undefined ? 'GET' : 'POST',
         cache: 'no-store', credentials: 'omit', headers: { 'X-Orchestrator-Token': token || '',
-          ...(answer === undefined ? {} : { 'Content-Type': 'application/json' }) },
-        ...(answer === undefined ? {} : { body: JSON.stringify({ answer }) }) });
+          ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
       let data = null;
       try { data = await response.json(); } catch (_) { /* Reported through the status code below. */ }
-      if (!response.ok) throw new Error(t(errorKeys[response.status] || (answer === undefined ? 'err.request' : 'err.save')));
+      if (!response.ok) {
+        const code = data?.code; const field = data?.field;
+        const message = code === 'invalid_request' ? t('err.invalid', { field: t(`field.${field}`) === `field.${field}` ? String(field) : t(`field.${field}`) })
+          : code === 'engine_rejected' ? t('err.engine') : code === 'engine_timeout' ? t('err.engineTimeout')
+          : t(errorKeys[response.status] || (body === undefined ? 'err.request' : 'err.save'));
+        throw new ApiError(message, { status: response.status, code, field, detail: code === 'engine_rejected' ? data.error : null });
+      }
       return data;
     } catch (error) {
-      if (error.name === 'AbortError') throw new Error(t('err.timeout'));
+      if (error.name === 'AbortError') throw new ApiError(t('err.timeout'));
       throw error;
     } finally { clearTimeout(timeout); }
   }
@@ -173,7 +186,7 @@
       button.addEventListener('click', () => button.dataset.agentId ? selectAgent(button.dataset.agentId) : selectOrchestrator());
       return button;
     }, (button, item) => {
-      const selected = item.orchestrator ? state.agent === null : state.agent === item.job_id;
+      const selected = item.orchestrator ? state.agent === null && state.plan === null : state.agent === item.job_id;
       const questions = item.orchestrator ? project.pending_feedback.length : item.pending_questions.length;
       button.dataset.agentId = item.orchestrator ? '' : item.job_id;
       button.setAttribute('aria-current', String(selected));
@@ -229,8 +242,9 @@
       return card;
     }
     if (item.kind === 'plan') {
-      const card = node('div', null, 'node node-plan');
+      const card = node('button', null, 'node node-plan'); card.type = 'button';
       card.append(node('small', t('canvas.plan'), 'node-kicker'), node('strong', null, 'node-name'), node('progress'), node('small', null, 'node-meta'));
+      card.addEventListener('click', () => selectPlan(card.dataset.planId));
       return card;
     }
     const card = node('button', null, 'node node-project'); card.type = 'button';
@@ -255,7 +269,8 @@
       const counts = item.plan.counts || {};
       const total = Object.values(counts).reduce((sum, value) => sum + value, 0);
       const done = counts.done || 0;
-      card.dataset.tone = item.plan.complete ? 'green' : 'neutral';
+      card.dataset.tone = item.plan.complete ? 'green' : 'neutral'; card.dataset.planId = item.plan.plan_id;
+      card.setAttribute('aria-pressed', String(item.plan.plan_id === state.plan));
       card.querySelector('.node-name').textContent = item.plan.title || item.plan.plan_id;
       card.title = card.querySelector('.node-name').textContent;
       const bar = card.querySelector('progress'); bar.max = total || 1; bar.value = done;
@@ -264,7 +279,7 @@
     } else {
       const project = item.project;
       card.dataset.tone = tone(project);
-      card.setAttribute('aria-pressed', String(state.agent === null));
+      card.setAttribute('aria-pressed', String(state.agent === null && state.plan === null));
       card.querySelector('.node-name').textContent = project.name;
       card.querySelector('.node-meta').textContent = t('canvas.projectStats', { agents: tn('count.agents', project.jobs.length), plans: tn('count.plans', project.plans.length) });
     }
@@ -295,7 +310,10 @@
     $('canvas').hidden = !project;
     if (!project) { $('canvas-nodes').replaceChildren(); $('canvas-links').replaceChildren(); return; }
     const graph = buildGraph(project, rows);
+    // A graph that grew or shrank (new plan, filter) is refitted unless the person already moved the camera.
+    const resized = state.world.w !== graph.width || state.world.h !== graph.height;
     state.world = { w: graph.width, h: graph.height };
+    if (resized && !state.camera.touched) state.camera.fitted = null;
     reconcile($('canvas-nodes'), graph.nodes, item => item.key, createNode, updateNode);
     const svg = $('canvas-links');
     svg.setAttribute('width', graph.width); svg.setAttribute('height', graph.height);
@@ -374,6 +392,7 @@
       button.querySelector('.count').textContent = item.jobs.length;
       button.title = `${item.name} · ${item.id}`;
     });
+    actions.renderProjectActions(p);
     renderAgentNavigation(p);
     $('project-title').textContent = selected ? agentName(selected) : p ? p.name : t('project.default');
     $('project-subtitle').textContent = selected
@@ -432,31 +451,36 @@
   }
   function focusTarget(pid, job) {
     $('notice').textContent = '';
-    state.project = pid; state.agent = job;
+    state.project = pid; state.agent = job; state.plan = null;
     setTab('messages'); clearInspector(); renderOverview(); loadDetail();
   }
   function selectProject(id) {
     if (state.project === id) return;
     $('notice').textContent = '';
     state.project = id;
-    state.agent = null;
+    state.agent = null; state.plan = null;
     state.feedback = []; clearInspector(); renderOverview(); loadDetail();
   }
   function selectAgent(id) {
-    if (state.agent === id) return;
+    if (state.agent === id && state.plan === null) return;
     $('notice').textContent = '';
-    state.agent = id; clearInspector(); renderOverview(); loadDetail();
+    state.agent = id; state.plan = null; clearInspector(); renderOverview(); loadDetail();
+  }
+  function selectPlan(id) {
+    if (state.plan === id) return;
+    $('notice').textContent = '';
+    state.plan = id; state.agent = null; clearInspector(); renderOverview(); loadDetail();
   }
   function selectOrchestrator() {
     $('notice').textContent = '';
-    if (state.agent !== null) { state.agent = null; clearInspector(); renderOverview(); }
+    if (state.agent !== null || state.plan !== null) { state.agent = null; state.plan = null; clearInspector(); renderOverview(); }
     setTab('messages'); loadDetail();
   }
   function clearInspector() {
-    state.generation++; state.detail = null; state.transcript = null; state.followed = null;
+    state.generation++; state.detail = null; state.planDetail = null; state.transcript = null; state.followed = null;
     ['timeline', 'questions', 'history', 'summary', 'files', 'tests', 'usage', 'stdout', 'stderr'].forEach(id => $(id).replaceChildren());
     $('detail-status').textContent = t('inspector.loading');
-    $('inspector-title').textContent = state.agent ? t('inspector.loadingAgent') : t('inspector.coordinator');
+    $('inspector-title').textContent = state.agent ? t('inspector.loadingAgent') : state.plan ? t('plan.loading') : t('inspector.coordinator');
     $('inspector-subtitle').textContent = selectedProject()?.name || t('inspector.noProject');
   }
   function setTab(tab, focus = false) {
@@ -587,7 +611,7 @@
           if (!input.value.trim()) { result.textContent = t('question.empty'); input.focus(); return; }
           const answer = input.value; submit.disabled = true; result.textContent = t('question.saving');
           try {
-            await api(route, answer); state.drafts.delete(route);
+            await api(route, { answer }); state.drafts.delete(route);
             result.textContent = t('question.savedOk'); input.readOnly = true;
             $('notice').textContent = t('question.savedNotice');
             // Keep the successful form visible and focused until the next deliberate selection.
@@ -657,6 +681,20 @@
     $('inspector-subtitle').textContent = `${j?.role || (isWorker ? t('common.worker') : t('inspector.projectDecisions'))} · ${p?.name || ''}`;
     $('local-logs').hidden = !j;
     $('detail-status').textContent = '';
+    // The agent sections, the plan detail, and the plan list are mutually exclusive views.
+    const viewingPlan = Boolean(state.plan);
+    $('agent-sections').hidden = viewingPlan;
+    $('plan-detail').hidden = !viewingPlan;
+    $('show-messages').hidden = viewingPlan;
+    actions.renderPlansList(!isWorker && !viewingPlan ? p : null);
+    actions.renderJobActions(isWorker ? j : null);
+    if (viewingPlan) {
+      const plan = state.planDetail;
+      $('inspector-title').textContent = plan?.title || t('plan.loading');
+      $('inspector-subtitle').textContent = `${t('canvas.plan')} · ${p?.name || ''}`;
+      actions.renderPlanDetail(plan);
+      return;
+    }
     if (j) {
       const transcript = state.transcript?.agent === state.agent ? state.transcript.data : null;
       const toolFiles = transcript?.files || [];
@@ -695,12 +733,14 @@
   }
   async function loadDetail() {
     const generation = ++state.generation;
-    const project = state.project; const agent = state.agent;
+    const project = state.project; const agent = state.agent; const plan = state.plan;
     if (!project) { clearInspector(); $('detail-status').textContent = t('inspector.selectProject'); return; }
     try {
-      const [data] = await Promise.all([api(`/api/projects/${project}${agent ? '/jobs/' + agent : ''}`), agent ? loadTranscript(project, agent, generation) : null]);
+      const path = plan ? `/api/projects/${project}/plans/${plan}` : `/api/projects/${project}${agent ? '/jobs/' + agent : ''}`;
+      const [data] = await Promise.all([api(path), agent ? loadTranscript(project, agent, generation) : null]);
       if (generation !== state.generation) return;
-      if (agent) state.detail = data;
+      if (plan) state.planDetail = data;
+      else if (agent) state.detail = data;
       else { state.detail = null; state.feedback = data.feedback_history; const p = selectedProject(); if (p) p.pending_feedback = data.pending_feedback; }
       renderInspector();
     } catch (error) { if (generation === state.generation) $('detail-status').textContent = error.message; }
@@ -721,6 +761,8 @@
         clearInspector();
       } else if (state.agent && !selectedProject().jobs.some(j => j.job_id === state.agent)) {
         state.agent = null; clearInspector();
+      } else if (state.plan && !selectedProject().plans.some(plan => plan.plan_id === state.plan)) {
+        state.plan = null; clearInspector();
       }
       renderOverview(); await loadDetail();
       setConnection(state.paused ? 'neutral' : 'green', state.paused ? 'connection.paused' : 'connection.ok');
@@ -753,6 +795,7 @@
     });
   });
   function updateClock() { $('clock').textContent = `${dateLong(new Date())} · ${when(new Date().toISOString())}`; }
+  const actions = window.AOActions({ state, $, node, t, tn, st, api, reconcile, dot, tone, agentName, FAILURE, refresh, selectPlan, selectAgent, selectOrchestrator, selectedProject });
   clearInspector(); setRefreshText(); setConnection('blue', 'connection.connecting');
   $('project-title').textContent = t('project.default'); $('project-subtitle').textContent = t('project.connecting');
   $('agent-navigation-empty').textContent = t('agents.select');

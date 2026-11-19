@@ -22,6 +22,18 @@
 - Codex jobs in a workspace that is not a Git repository now pass `--skip-git-repo-check` (new
   `non_git_args` profile key). The Codex sandbox stays `workspace-write`; only the trusted-directory
   startup check is skipped. Previously these jobs failed immediately.
+- Act from the dashboard: cancel a running job, record a review, create a plan, launch a plan item, and
+  retry a failed or rejected item. Every change is delegated to the engine CLI in a subprocess (new
+  `panel_actions.py`), so executor approval, expensive-model protection, task contracts, attempt limits,
+  workspace locks, and review evidence rules are enforced by the engine and its rejection text is shown
+  verbatim. Requests are strictly validated, free-text values are passed as `--option=value`, and user text
+  cannot forge plan headings or checklist items.
+- An accepted review still requires at least one independently run test result, and an accepted review is
+  immutable; launching requires an explicit confirmation of the executor and its cost.
+- New routes: `GET /api/executors`, `GET /api/projects/<id>/plans/<id>`, `GET .../jobs/<id>/launch-template`,
+  and `POST` for `.../jobs/<id>/cancel`, `.../jobs/<id>/review`, `.../plans`, and
+  `.../plans/<id>/items/<id>/launch`. Authentication, loopback origin checks, and the 64 KiB limit for question
+  answers are unchanged; actions accept up to 256 KiB.
 
 ## 0.7.1 - 2026-09-14
 
