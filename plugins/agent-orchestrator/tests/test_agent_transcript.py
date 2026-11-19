@@ -90,6 +90,59 @@ class TranscriptTests(unittest.TestCase):
         self.assertEqual(result["unrecognized_lines"], 2)
         self.assertEqual(result["messages"], [])
 
+    def test_antigravity_stream_json_joins_text_deltas_and_reads_tool_calls(self):
+        step = lambda **kw: {"event": "step_update", "step_update": {"conversation_id": "c", **kw}}
+        result = self.write(
+            {"event": "init", "init": {"model": "gemini-3.8-flash-low", "tools": []}},
+            step(step_index=0, state="DONE", step_type="user_input"),
+            step(step_index=1, state="ACTIVE", step_type="tool", tool_name="write_file",
+                 tool_info={"name": "write_file", "parameters": {"Path": "/w/hola.txt"}}),
+            step(step_index=1, state="DONE", step_type="tool", tool_name="write_file",
+                 tool_info={"name": "write_file", "parameters": {"Path": "/w/hola.txt"}}),
+            step(step_index=2, state="ACTIVE", step_type="agent_response", text_delta="Se ha"),
+            step(step_index=2, state="ACTIVE", step_type="agent_response", text_delta=" creado el archivo."),
+            step(step_index=2, state="DONE", step_type="agent_response", text_delta="\n"),
+            {"event": "result", "result": {"status": "SUCCESS", "response": "Se ha creado el archivo.\n",
+                                           "num_turns": 1, "duration_seconds": 4.5}},
+        )
+        self.assertEqual(result["format"], "antigravity-stream-json")
+        self.assertEqual([m["kind"] for m in result["messages"]], ["tool", "text"])
+        self.assertEqual(result["messages"][0]["name"], "write_file")
+        self.assertEqual(result["messages"][1]["text"].strip(), "Se ha creado el archivo.")
+        self.assertEqual(result["files"], [{"path": "/w/hola.txt", "tool": "write_file"}])
+        self.assertEqual((result["stats"]["num_turns"], result["stats"]["status"]), (1, "SUCCESS"))
+        self.assertEqual(result["unrecognized_lines"], 0)
+
+    def test_antigravity_shows_text_of_a_step_that_is_still_streaming_and_failures(self):
+        step = lambda **kw: {"event": "step_update", "step_update": {"conversation_id": "c", **kw}}
+        live = self.write(step(step_index=3, state="ACTIVE", step_type="agent_response", text_delta="Trabajando"))
+        self.assertEqual([m["text"] for m in live["messages"]], ["Trabajando"])
+        failed = self.write({"event": "result", "result": {"status": "ERROR", "error": "unknown model"}})
+        self.assertEqual([(m["kind"], m["text"]) for m in failed["messages"]], [("error", "unknown model")])
+
+    def test_opencode_json_reads_text_tools_errors_and_ignores_step_markers(self):
+        base = {"sessionID": "ses_1"}
+        result = self.write(
+            {"type": "step_start", **base, "part": {"type": "step-start"}},
+            {"type": "tool_use", **base, "part": {"tool": "write", "state": {
+                "status": "completed", "input": {"filePath": "/w/hola.txt", "content": "x"}, "output": "ok"}}},
+            {"type": "tool_use", **base, "part": {"tool": "bash", "state": {
+                "status": "completed", "input": {"command": "cat /w/hola.txt"}}}},
+            {"type": "text", **base, "part": {"text": "LISTO"}},
+            {"type": "step_finish", **base, "part": {"reason": "stop", "tokens": {"total": 1}}},
+            {"type": "error", **base, "error": {"name": "APIError", "data": {"message": "maximum number of items is 128"}}},
+        )
+        self.assertEqual(result["format"], "opencode-json")
+        self.assertEqual([m["kind"] for m in result["messages"]], ["tool", "tool", "text", "error"])
+        self.assertEqual(result["messages"][1]["text"], "cat /w/hola.txt")
+        self.assertEqual(result["messages"][3]["text"], "maximum number of items is 128")
+        self.assertEqual(result["files"], [{"path": "/w/hola.txt", "tool": "write"}])
+        self.assertEqual(result["unrecognized_lines"], 0)
+
+    def test_codex_error_events_are_not_mistaken_for_opencode_ones(self):
+        result = self.write({"type": "error", "message": "codex boom"})
+        self.assertEqual((result["format"], result["messages"][0]["text"]), ("codex-jsonl", "codex boom"))
+
     def test_missing_or_empty_log_is_empty(self):
         self.assertEqual(transcript.read_transcript(self.log)["format"], "empty")
         self.assertEqual(self.write()["messages"], [])

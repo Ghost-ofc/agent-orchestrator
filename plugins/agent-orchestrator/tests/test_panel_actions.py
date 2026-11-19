@@ -4,6 +4,7 @@ import http.client
 import json
 import os
 import stat
+import subprocess
 import sys
 import tempfile
 import threading
@@ -244,6 +245,116 @@ class ActionTests(ActionBase):
         answer = f"/api/projects/{self.pid}/feedback/seed/answer"
         self.assertEqual(self.post(answer, {"answer": "x" * 70_000})[0], 413)
         self.assertEqual(self.post(answer, {"answer": "ok", "extra": 1})[0], 400)
+
+
+FAKE_AGY = """#!/usr/bin/env python3
+import json, sys
+a = sys.argv[1:]
+# The real agy: --print takes the prompt as its value, so a flag right after it is an error.
+for i, x in enumerate(a):
+    if x in ("--print", "-p", "--prompt") and (i + 1 >= len(a) or a[i + 1].startswith("-")):
+        sys.stderr.write("Error: --print took a flag as its prompt, so the intended prompt was left as an argument and ignored.\\n")
+        sys.exit(2)
+message = json.loads(sys.stdin.readline())
+assert message["event"] == "user" and message["message"]["content"].strip()
+open("hola.txt", "w").write("hola")
+step = lambda **kw: print(json.dumps({"event": "step_update", "step_update": {"conversation_id": "c", **kw}}), flush=True)
+print(json.dumps({"event": "init", "init": {"model": a[a.index("--model") + 1], "tools": []}}), flush=True)
+step(step_index=1, state="ACTIVE", step_type="tool", tool_name="write_file", tool_info={"name": "write_file", "parameters": {"Path": "hola.txt"}})
+step(step_index=2, state="ACTIVE", step_type="agent_response", text_delta="Archivo ")
+step(step_index=2, state="DONE", step_type="agent_response", text_delta="creado.")
+print(json.dumps({"event": "result", "result": {"status": "SUCCESS", "response": "Archivo creado.", "num_turns": 1,
+      "usage": {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10}}}), flush=True)
+"""
+
+# The real opencode 1.18: `run` only; a free model's upstream rejects more than 128 tools, and every
+# MCP server in the user's global config adds tools to every run.
+FAKE_OPENCODE = """#!/usr/bin/env python3
+import json, os, sys
+a = sys.argv[1:]
+if a[:1] != ["run"]:
+    sys.stderr.write("Unknown arguments: " + " ".join(a) + "\\n")
+    sys.exit(1)
+prompt = sys.stdin.read()
+home = os.environ.get("XDG_CONFIG_HOME", "")
+config = os.path.join(home, "opencode", "opencode.json")
+servers = len(json.load(open(config)).get("mcp", {})) if os.path.exists(config) else 0
+open("seen-xdg.txt", "w").write(home)
+if servers * 25 > 128:
+    print(json.dumps({"type": "error", "sessionID": "s", "error": {"name": "APIError", "data": {
+        "message": "Upstream request failed: [invalid_value] Invalid value for 'tools': maximum number of items is 128."}}}))
+    sys.exit(1)
+assert prompt.strip()
+model = a[a.index("--model") + 1]
+print(json.dumps({"type": "text", "sessionID": "s", "part": {"type": "text", "text": "listo con " + model}}))
+print(json.dumps({"type": "step_finish", "sessionID": "s", "part": {"type": "step-finish", "cost": 0,
+      "tokens": {"total": 10, "input": 6, "output": 4, "reasoning": 0, "cache": {"read": 0, "write": 0}}}}))
+"""
+
+
+class AdapterRegressionTests(ActionBase):
+    """Antigravity and OpenCode failed for reasons only the real CLIs reveal; these fakes enforce them."""
+
+    def setUp(self):
+        super().setUp()
+        bin_dir = Path(self.temp.name) / "bin"
+        for name, source in (("agy", FAKE_AGY), ("opencode", FAKE_OPENCODE)):
+            executable = bin_dir / name
+            executable.write_text(source)
+            executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+        # The person's own interactive OpenCode setup: seven MCP servers.
+        self.user_xdg = Path(self.temp.name) / "user-xdg"
+        (self.user_xdg / "opencode").mkdir(parents=True)
+        (self.user_xdg / "opencode" / "opencode.json").write_text(
+            json.dumps({"mcp": {f"server-{index}": {"type": "local"} for index in range(7)}})
+        )
+        xdg = patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self.user_xdg)})
+        xdg.start()
+        self.addCleanup(xdg.stop)
+
+    def run_item(self, cli, model):
+        plan = self.make_plan(executors=[f"{cli}={model}"])[1]
+        status, launched = self.post(
+            f"/api/projects/{self.pid}/plans/{plan['plan_id']}/items/item-001/launch",
+            self.launch_body(cli=cli, model=model),
+        )
+        self.assertEqual(status, 200, launched)
+        self.wait_finished(launched["job_id"])
+        return launched["job_id"]
+
+    def test_the_opencode_fake_reproduces_the_failure_without_isolation(self):
+        # Control: run it the way the old integration did, with the person's own config.
+        completed = subprocess.run(
+            [str(Path(self.temp.name) / "bin" / "opencode"), "run"], input="hola", text=True,
+            capture_output=True, cwd=self.workspace,
+        )
+        self.assertEqual(completed.returncode, 1)
+        self.assertIn("maximum number of items is 128", completed.stdout)
+
+    def test_opencode_runs_with_a_free_model_and_without_the_users_mcp_servers(self):
+        job_id = self.run_item("opencode", "opencode/big-pickle")
+        job_dir = jobs.job_dir(job_id)
+        self.assertEqual(jobs.get_status(job_dir)["state"], "succeeded")
+        seen = Path(self.workspace / "seen-xdg.txt").read_text()
+        self.assertNotEqual(seen, str(self.user_xdg))
+        self.assertTrue(seen.startswith(str(job_dir)), seen)
+        status, transcript = self.request(f"/api/projects/{self.pid}/jobs/{job_id}/transcript")
+        self.assertEqual(
+            [m["text"] for m in transcript["messages"]], ["listo con opencode/big-pickle"]
+        )
+        usage = self.request(f"/api/projects/{self.pid}/jobs/{job_id}")[1]["usage"]
+        self.assertEqual((usage["total_tokens"], usage["input_tokens"], usage["output_tokens"]), (10, 6, 4))
+
+    def test_antigravity_runs_through_the_engine_and_the_panel_reads_its_output(self):
+        job_id = self.run_item("antigravity", "gemini-3.8-flash-low")
+        self.assertEqual(jobs.get_status(jobs.job_dir(job_id))["state"], "succeeded")
+        self.assertEqual((self.workspace / "hola.txt").read_text(), "hola")
+        transcript = self.request(f"/api/projects/{self.pid}/jobs/{job_id}/transcript")[1]
+        self.assertEqual([m["kind"] for m in transcript["messages"]], ["tool", "text"])
+        self.assertEqual(transcript["messages"][1]["text"], "Archivo creado.")
+        self.assertEqual(transcript["files"], [{"path": "hola.txt", "tool": "write_file"}])
+        usage = self.request(f"/api/projects/{self.pid}/jobs/{job_id}")[1]["usage"]
+        self.assertEqual(usage["total_tokens"], 10)
 
 
 class CancelRunningJobTests(ActionBase):

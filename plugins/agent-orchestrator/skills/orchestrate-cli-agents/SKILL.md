@@ -183,16 +183,16 @@ python3 <runner> plan-checkpoint <plan-id> --json
 
 python3 <runner> set-executors <plan-id> \
   --executor 'devin=swe-2' \
-  --executor 'opencode' \
+  --executor 'opencode=opencode/big-pickle' \
   --executor 'grok=grok-code-fast-1' \
   --terra-fallback-after-seconds 900 \
   --json
 ```
 
 For an explicit custom pool, the Terra option must be disclosed when asking for the pool. Omit
-`--terra-fallback-after-seconds` if the user does not pre-approve it. `opencode` without `=MODEL`
-means the user explicitly accepted that harness's configured default because the adapter cannot
-select a model itself.
+`--terra-fallback-after-seconds` if the user does not pre-approve it. A bare CLI without `=MODEL`
+means the user explicitly accepted that harness's configured default; only adapters that cannot select
+a model (for example `deepseek-harness`) allow it.
 
 For multiple workers, assign a short `--group` and distinct `--role` to every job. Launch independent
 roles in separate worktrees. Use `--depends-on` for ordered work; never let two jobs write the same
@@ -264,6 +264,12 @@ explicit model with `catalog --cli antigravity`; optionally pin its internal age
 runner sends one JSON user event over private stdin and captures streaming events/usage. Never add
 `--dangerously-skip-permissions`. Antigravity soft-denies unapproved tools in headless mode, so tell
 the user which narrow workspace-write and test-command permission rules the selected task needs.
+
+OpenCode runs `opencode run --format json` with the prompt on stdin and a private `XDG_CONFIG_HOME`
+per job, so workers do not inherit the user's global MCP servers, plugins, commands, or agents (the
+workspace's own `opencode.json` and `.opencode/` still apply). Discover models with
+`catalog --cli opencode` and always pin one (`provider/model`); free models end in `-free`. Verified on
+OpenCode 1.18.x; newer releases may share a background server that ignores per-job configuration.
 
 DeepSeek Harness is a developer-preview adapter and currently passes the task packet as a process
 argument because that is the documented headless interface. Warn the user that the prompt may be

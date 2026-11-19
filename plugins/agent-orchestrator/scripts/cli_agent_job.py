@@ -54,6 +54,7 @@ ALLOWED_PLACEHOLDERS = {
     "workspace",
     "channel_dir",
     "plugin_root",
+    "job_dir",
     "prompt_file",
     "prompt_text",
     "model",
@@ -63,6 +64,13 @@ ALLOWED_PLACEHOLDERS = {
     "reasoning_effort",
 }
 EXPENSIVE_EXECUTOR_MARKERS = ("astra", "fable", "opus")
+ENV_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+ENV_PLACEHOLDERS = {"workspace", "channel_dir", "plugin_root", "job_dir", "prompt_file"}
+# Process-control variables a profile must never set; XDG_*, *_CONFIG_* and similar are fine.
+FORBIDDEN_ENV_NAMES = {
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "PYTHONPATH", "PYTHONHOME", "NODE_OPTIONS",
+    "NODE_PATH", "AGENT_ORCHESTRATOR_HOME",
+}
 DEFAULT_EXECUTOR_LABEL = "<configured-default>"
 STRATEGIES = ("cost-first", "quality-first", "maximum-quality")
 RISKS = ("low", "medium", "high")
@@ -243,9 +251,10 @@ BUILTIN_PROFILES: dict[str, dict[str, Any]] = {
         "maturity": "stable",
         "docs_url": "https://antigravity.google/docs/cli/headless/",
         "install_hint": "Install and authenticate Antigravity CLI, then ensure `agy` is on PATH.",
+        # `--print` takes the prompt as its value, so it would swallow `--input-format`. The documented
+        # stdin form is `--input-format stream-json` with the prompt arriving as a `user` event.
         "argv": [
             "agy",
-            "--print",
             "--input-format",
             "stream-json",
             "--output-format",
@@ -431,20 +440,25 @@ BUILTIN_PROFILES: dict[str, dict[str, Any]] = {
     },
     "opencode": {
         "display_name": "OpenCode",
-        "description": "Run an OpenCode implementation worker in the selected workspace.",
+        "description": (
+            "Run an OpenCode worker headlessly with `opencode run`; select any provider/model, "
+            "including the free opencode/*-free models."
+        ),
         "maturity": "stable",
-        "install_hint": "Install and configure OpenCode, then ensure `opencode` is on PATH.",
-        "argv": [
-            "opencode",
-            "--cwd",
-            "{workspace}",
-            "--quiet",
-            "--output-format",
-            "text",
-            "--prompt",
-            "{prompt_text}",
-        ],
-        "prompt_transport": "arg",
+        "docs_url": "https://opencode.ai/docs/cli/",
+        "install_hint": "Install OpenCode, then ensure `opencode` is on PATH.",
+        # Verified against OpenCode 1.18.x: `run` reads the prompt from stdin, so it never appears in
+        # the process list. Permission prompts that are not pre-allowed are denied, not auto-approved.
+        "argv": ["opencode", "run", "--format", "json", "--dir", "{workspace}"],
+        "prompt_transport": "stdin",
+        "model_args": ["--model", "{model}"],
+        "cli_agent_args": ["--agent", "{cli_agent}"],
+        "reasoning_effort_args": ["--variant", "{reasoning_effort}"],
+        "discover_models_argv": ["opencode", "models"],
+        # Workers must not inherit the interactive setup: its MCP servers and plugins push the tool
+        # count past the 128 a free model's upstream accepts, and would hand workers credentials for
+        # unrelated systems. Provider credentials live in XDG_DATA_HOME and are unaffected.
+        "env": {"XDG_CONFIG_HOME": "{job_dir}/opencode-config"},
     },
     "cursor": {
         "display_name": "Cursor CLI",
@@ -994,6 +1008,7 @@ def validate_profile(name: str, raw: Any) -> dict[str, Any]:
         "cost_args",
         "reasoning_effort_args",
         "non_git_args",
+        "env",
         "models",
         "cli_agents",
         "discover_models_argv",
@@ -1053,12 +1068,33 @@ def validate_profile(name: str, raw: Any) -> dict[str, Any]:
         "discover_models_argv",
         "discover_cli_agents_argv",
     }
+    if "env" in raw:
+        environment = raw["env"]
+        if not isinstance(environment, dict) or not environment or len(environment) > 16:
+            raise RunnerError(f"{name}.env must be a non-empty object of at most 16 variables")
+        for variable, value in environment.items():
+            if (
+                not isinstance(variable, str)
+                or not ENV_NAME_RE.fullmatch(variable)
+                or variable in FORBIDDEN_ENV_NAMES
+                or variable.startswith(("LD_", "DYLD_"))
+            ):
+                raise RunnerError(f"{name}.env cannot set {variable!r}")
+            if not isinstance(value, str) or "\x00" in value or len(value) > 1024:
+                raise RunnerError(f"{name}.env.{variable} must be a string")
+            # Only values known when the worker starts; {model} and friends are command-line controls.
+            unknown = sorted(set(PLACEHOLDER_RE.findall(value)) - ENV_PLACEHOLDERS)
+            if unknown:
+                raise RunnerError(
+                    f"{name}.env.{variable} uses unsupported placeholders: {', '.join(unknown)}"
+                )
+        profile["env"] = dict(environment)
     tokens = [
         token
         for key, values in profile.items()
         if key in command_keys
         for token in values
-    ]
+    ] + list(profile.get("env", {}).values())
     placeholders = {
         match for token in tokens for match in PLACEHOLDER_RE.findall(token)
     }
@@ -1555,6 +1591,28 @@ def replace_placeholders(tokens: list[str], values: dict[str, str]) -> list[str]
     return result
 
 
+def build_environment(
+    profile: dict[str, Any],
+    workspace: Path,
+    prompt_file: Path,
+    channel_dir: Path | None = None,
+) -> dict[str, str] | None:
+    """Extra environment variables a profile asks for, or None. Paths under the job dir are private."""
+    template = profile.get("env")
+    if not template:
+        return None
+    values = {
+        "workspace": str(workspace),
+        "channel_dir": str(channel_dir or prompt_file.parent / "channel"),
+        "plugin_root": str(Path(__file__).resolve().parents[1]),
+        "job_dir": str(prompt_file.parent),
+        "prompt_file": str(prompt_file),
+    }
+    return {
+        key: replace_placeholders([value], values)[0] for key, value in template.items()
+    }
+
+
 def inside_git_worktree(workspace: Path) -> bool:
     try:
         check = subprocess.run(
@@ -1585,6 +1643,7 @@ def build_command(
         "workspace": str(workspace),
         "channel_dir": str(channel_dir or prompt_file.parent / "channel"),
         "plugin_root": str(Path(__file__).resolve().parents[1]),
+        "job_dir": str(prompt_file.parent),
         "prompt_file": str(prompt_file),
         "prompt_text": prompt_text,
     }
@@ -2417,12 +2476,35 @@ def usage_summary(log_path: Path) -> dict[str, Any] | None:
     if not log_path.exists():
         return None
     latest: dict[str, Any] | None = None
+    opencode_totals: dict[str, Any] = {}
     try:
         with log_path.open("r", encoding="utf-8", errors="replace") as handle:
             for line in handle:
                 try:
                     value = json.loads(line)
                 except json.JSONDecodeError:
+                    continue
+                part = value.get("part") if isinstance(value, dict) else None
+                if (
+                    isinstance(part, dict)
+                    and value.get("type") == "step_finish"
+                    and isinstance(part.get("tokens"), dict)
+                ):
+                    # OpenCode reports each model call separately; every call re-sends the context,
+                    # so the cumulative figure is the sum across steps.
+                    tokens = part["tokens"]
+                    cache = tokens.get("cache") if isinstance(tokens.get("cache"), dict) else {}
+                    for target, source in (
+                        ("input_tokens", tokens.get("input")),
+                        ("output_tokens", tokens.get("output")),
+                        ("thinking_tokens", tokens.get("reasoning")),
+                        ("total_tokens", tokens.get("total")),
+                        ("cache_read_input_tokens", cache.get("read")),
+                        ("cache_creation_input_tokens", cache.get("write")),
+                        ("total_cost_usd", part.get("cost")),
+                    ):
+                        if isinstance(source, (int, float)) and not isinstance(source, bool):
+                            opencode_totals[target] = opencode_totals.get(target, 0) + source
                     continue
                 fields: dict[str, Any] = {}
 
@@ -2451,6 +2533,8 @@ def usage_summary(log_path: Path) -> dict[str, Any] | None:
                     latest = {"provider_reported": True, **fields}
     except OSError:
         return None
+    if opencode_totals:
+        return {"provider_reported": True, **opencode_totals}
     return latest
 
 
@@ -3177,6 +3261,14 @@ def command_worker(args: argparse.Namespace) -> int:
             meta.get("reasoning_effort"),
             channel_dir(path),
         )
+        extra_env = build_environment(
+            profile, workspace, prompt_file, channel_dir(path)
+        )
+        if extra_env:
+            for value in extra_env.values():
+                candidate = Path(value)
+                if candidate.is_absolute() and path.resolve() in candidate.resolve().parents:
+                    candidate.mkdir(parents=True, exist_ok=True, mode=0o700)
         with stdout_path.open("wb") as stdout_handle, stderr_path.open(
             "wb"
         ) as stderr_handle:
@@ -3210,6 +3302,7 @@ def command_worker(args: argparse.Namespace) -> int:
                     stdin=stdin_handle,
                     stdout=stdout_handle,
                     stderr=stderr_handle,
+                    env={**os.environ, **extra_env} if extra_env else None,
                     start_new_session=True,
                     close_fds=True,
                 )

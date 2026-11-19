@@ -513,6 +513,89 @@ class CliAgentJobTests(unittest.TestCase):
             [token for token in outside if token.startswith("--") and "bypass" in token], []
         )
 
+    def build(self, profile_name, model=None, effort=None):
+        profile = runner.load_profiles(None)[profile_name]
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            task = root / "job" / "task.md"
+            task.parent.mkdir()
+            task.write_text("bounded task", encoding="utf-8")
+            command, transport = runner.build_command(
+                profile, workspace, task, model, None, None, None, effort
+            )
+            environment = runner.build_environment(profile, workspace, task)
+            return command, transport, environment, workspace, task
+
+    def test_antigravity_never_lets_print_swallow_the_next_flag(self) -> None:
+        # `agy --print` takes the prompt as its value: followed by --input-format it failed every run.
+        command, transport, environment, *_ = self.build("antigravity", "gemini-3.8-flash-low")
+        self.assertEqual(transport, "jsonl-stdin")
+        self.assertNotIn("--print", command)
+        self.assertNotIn("-p", command)
+        self.assertEqual(command[1:5], ["--input-format", "stream-json", "--output-format", "stream-json"])
+        self.assertEqual(command[-2:], ["--model", "gemini-3.8-flash-low"])
+        self.assertNotIn("--dangerously-skip-permissions", command)
+        self.assertIsNone(environment)
+
+    def test_opencode_uses_run_with_stdin_a_selectable_model_and_a_private_config(self) -> None:
+        command, transport, environment, workspace, task = self.build(
+            "opencode", "opencode/big-pickle", "high"
+        )
+        self.assertEqual(transport, "stdin")
+        self.assertEqual(command[1:4], ["run", "--format", "json"])
+        self.assertEqual(command[command.index("--dir") + 1], str(workspace))
+        self.assertEqual(command[command.index("--model") + 1], "opencode/big-pickle")
+        self.assertEqual(command[command.index("--variant") + 1], "high")
+        # The task travels on stdin, never as an argument or the removed legacy flags.
+        for legacy in ("--prompt", "--quiet", "--cwd", "--output-format"):
+            self.assertNotIn(legacy, command)
+        self.assertNotIn("bounded task", command)
+        self.assertNotIn("--auto", command)
+        self.assertEqual(
+            environment, {"XDG_CONFIG_HOME": str(task.parent / "opencode-config")}
+        )
+
+    def test_profile_env_rejects_process_control_variables_and_unknown_placeholders(self) -> None:
+        base = {"argv": ["tool"], "prompt_transport": "stdin"}
+        runner.validate_profile("ok", {**base, "env": {"XDG_CONFIG_HOME": "{job_dir}/cfg"}})
+        for bad in (
+            {"PATH": "/tmp"},
+            {"LD_PRELOAD": "x"},
+            {"DYLD_LIBRARY_PATH": "x"},
+            {"AGENT_ORCHESTRATOR_HOME": "x"},
+            {"lowercase": "x"},
+            {"OK": 1},
+            {"OK": "{model}/x"},
+            {},
+        ):
+            with self.assertRaises(runner.RunnerError, msg=str(bad)):
+                runner.validate_profile("bad", {**base, "env": bad})
+
+    def test_usage_summary_sums_opencode_steps_across_model_calls(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            log = Path(temp) / "stdout.log"
+            step = lambda total, inp, out, reasoning, read, write, cost: json.dumps({
+                "type": "step_finish", "sessionID": "s",
+                "part": {"cost": cost, "tokens": {"total": total, "input": inp, "output": out,
+                                                  "reasoning": reasoning, "cache": {"read": read, "write": write}}},
+            })
+            log.write_text("\n".join([
+                json.dumps({"type": "text", "sessionID": "s", "part": {"text": "hi"}}),
+                step(100, 60, 10, 5, 20, 4, 0.5),
+                step(200, 150, 20, 10, 30, 6, 0.25),
+            ]) + "\n")
+            usage = runner.usage_summary(log)
+        self.assertEqual(usage["input_tokens"], 210)
+        self.assertEqual(usage["output_tokens"], 30)
+        self.assertEqual(usage["thinking_tokens"], 15)
+        self.assertEqual(usage["total_tokens"], 300)
+        self.assertEqual(usage["cache_read_input_tokens"], 50)
+        self.assertEqual(usage["cache_creation_input_tokens"], 10)
+        self.assertAlmostEqual(usage["total_cost_usd"], 0.75)
+        self.assertTrue(usage["provider_reported"])
+
     def test_cursor_profile_is_sandboxed_and_denies_native_subagents(self) -> None:
         profile = runner.load_profiles(None)["cursor"]
         with tempfile.TemporaryDirectory() as temp:
@@ -566,6 +649,11 @@ class CliAgentJobTests(unittest.TestCase):
             executable.write_text(
                 "#!/usr/bin/env python3\n"
                 "import json,sys\n"
+                "# The real agy: --print takes the prompt as its value, so a flag right after it is an error.\n"
+                "a=sys.argv[1:]\n"
+                "for i,x in enumerate(a):\n"
+                "    if x in ('--print','-p','--prompt') and (i+1>=len(a) or a[i+1].startswith('-')):\n"
+                "        sys.stderr.write('Error: --print took a flag as its prompt, so the intended prompt was ignored.\\n'); sys.exit(2)\n"
                 "payload=json.loads(sys.stdin.readline())\n"
                 "print(json.dumps({'event':'result','result':{'status':'SUCCESS','payload':payload,'argv':sys.argv[1:]}}))\n",
                 encoding="utf-8",
@@ -615,7 +703,8 @@ class CliAgentJobTests(unittest.TestCase):
                 "# Assigned task", output["result"]["payload"]["message"]["content"]
             )
             argv = output["result"]["argv"]
-            self.assertIn("--print", argv)
+            self.assertNotIn("--print", argv)
+            self.assertEqual(argv[:2], ["--input-format", "stream-json"])
             self.assertIn("--sandbox", argv)
             self.assertEqual(argv[argv.index("--model") + 1], "gemini-flash-test")
             self.assertNotIn("--dangerously-skip-permissions", argv)

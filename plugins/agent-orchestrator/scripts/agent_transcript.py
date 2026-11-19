@@ -3,7 +3,8 @@
 
 The dashboard never executes or renders this content as markup; it only returns bounded plain text.
 Supported shapes: Claude-style ``stream-json`` (assistant / result lines), Codex ``--json`` events
-(``item.completed``), and plain text. Anything else is counted as unrecognized, never guessed.
+(``item.completed``), Antigravity ``stream-json`` (``step_update`` / ``result``), OpenCode
+``--format json`` (``text`` / ``tool_use`` / ``step_finish``), and plain text. Anything else is counted as unrecognized, never guessed.
 """
 from __future__ import annotations
 
@@ -18,7 +19,12 @@ MAX_TEXT = 20000
 MAX_COMMAND_OUTPUT = 2000
 WRITE_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
 ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
-TOOL_KEYS = ("file_path", "notebook_path", "path", "command", "pattern", "url", "query", "description")
+TOOL_KEYS = (
+    "file_path", "filePath", "notebook_path", "Path", "path", "AbsolutePath", "TargetFile",
+    "command", "CommandLine", "pattern", "url", "Url", "query", "Query", "description",
+)
+# Tool names (Antigravity / OpenCode) that write a file named by their path argument.
+WRITE_TOOL_HINTS = ("write", "edit", "replace", "patch")
 
 
 def clip(value: Any, limit: int = MAX_TEXT) -> tuple[str, bool]:
@@ -45,6 +51,8 @@ class Transcript:
         self.unrecognized = 0
         self.thinking_blocks = 0
         self.last_text = ""  # Unclipped, so a long final result is not shown twice.
+        self._agy_text: dict[int, str] = {}  # Antigravity streams text in deltas per step.
+        self._agy_tools: set[int] = set()
         self._plain: list[str] = []
 
     def add(self, kind: str, role: str, text: str, name: str | None = None) -> None:
@@ -137,6 +145,73 @@ class Transcript:
             return True
         return False
 
+    def feed_antigravity(self, value: dict[str, Any]) -> bool:
+        event = value.get("event")
+        if event == "init":
+            self.formats.add("antigravity-stream-json")
+            return True
+        if event == "step_update" and isinstance(value.get("step_update"), dict):
+            self.formats.add("antigravity-stream-json")
+            step = value["step_update"]
+            index = step.get("step_index") if isinstance(step.get("step_index"), int) else -1
+            kind = step.get("step_type")
+            if kind == "agent_response":
+                delta = step.get("text_delta")
+                if isinstance(delta, str):
+                    self._agy_text[index] = self._agy_text.get(index, "") + delta
+                if step.get("state") == "DONE" and index in self._agy_text:
+                    self.last_text = self._agy_text.pop(index)
+                    self.add("text", "assistant", self.last_text)
+            elif kind == "tool" and index not in self._agy_tools:
+                self._agy_tools.add(index)
+                info = step.get("tool_info") if isinstance(step.get("tool_info"), dict) else {}
+                name = str(step.get("tool_name") or info.get("name") or "tool")
+                parameters = info.get("parameters")
+                self.add("tool", "tool", tool_summary(parameters), name)
+                if any(hint in name.lower() for hint in WRITE_TOOL_HINTS) and isinstance(parameters, dict):
+                    self.touch(next((parameters[key] for key in TOOL_KEYS if isinstance(parameters.get(key), str)), None), name)
+            return True
+        if event == "result" and isinstance(value.get("result"), dict):
+            self.formats.add("antigravity-stream-json")
+            result = value["result"]
+            status = result.get("status")
+            response = result.get("response")
+            if status not in (None, "SUCCESS"):
+                self.add("error", "system", str(result.get("error") or status))
+            elif isinstance(response, str) and response.strip() and response.strip() != self.last_text.strip():
+                self.add("result", "assistant", response)
+            for key in ("num_turns", "duration_seconds"):
+                if isinstance(result.get(key), (int, float)):
+                    self.stats[key] = result[key]
+            if status is not None:
+                self.stats["status"] = status
+            return True
+        return False
+
+    def feed_opencode(self, value: dict[str, Any]) -> bool:
+        kind = value.get("type")
+        if "sessionID" not in value or kind not in {"step_start", "step_finish", "text", "tool_use", "error"}:
+            return False
+        self.formats.add("opencode-json")
+        part = value.get("part") if isinstance(value.get("part"), dict) else {}
+        if kind == "text":
+            self.last_text = part.get("text") if isinstance(part.get("text"), str) else ""
+            self.add("text", "assistant", self.last_text)
+        elif kind == "tool_use":
+            name = str(part.get("tool") or "tool")
+            state = part.get("state") if isinstance(part.get("state"), dict) else {}
+            inputs = state.get("input")
+            self.add("tool", "tool", tool_summary(inputs) or str(state.get("title") or ""), name)
+            if state.get("status") == "error":
+                self.add("error", "system", str(state.get("error") or ""))
+            if any(hint in name.lower() for hint in WRITE_TOOL_HINTS) and isinstance(inputs, dict):
+                self.touch(next((inputs[key] for key in TOOL_KEYS if isinstance(inputs.get(key), str)), None), name)
+        elif kind == "error":
+            error = value.get("error") if isinstance(value.get("error"), dict) else {}
+            data = error.get("data") if isinstance(error.get("data"), dict) else {}
+            self.add("error", "system", str(data.get("message") or error.get("name") or ""))
+        return True
+
     def feed(self, line: str) -> None:
         line = line.strip()
         if not line:
@@ -149,7 +224,12 @@ class Transcript:
                 self.flush_plain()
             return
         self.flush_plain()
-        if not isinstance(value, dict) or not (self.feed_claude(value) or self.feed_codex(value)):
+        if not isinstance(value, dict) or not (
+            self.feed_antigravity(value)
+            or self.feed_opencode(value)
+            or self.feed_claude(value)
+            or self.feed_codex(value)
+        ):
             self.unrecognized += 1
 
 
@@ -173,9 +253,11 @@ def read_transcript(log_path: Path) -> dict[str, Any]:
     except OSError:
         pass
     transcript.flush_plain()
+    for index in sorted(transcript._agy_text):
+        transcript.add("text", "assistant", transcript._agy_text[index])
     dropped = max(0, len(transcript.messages) - MAX_MESSAGES)
     messages = transcript.messages[-MAX_MESSAGES:]
-    if "claude-stream-json" in transcript.formats and "codex-jsonl" in transcript.formats:
+    if len(transcript.formats) > 1:
         detected = "mixed"
     else:
         detected = next(iter(sorted(transcript.formats)), "plain" if messages else "empty")

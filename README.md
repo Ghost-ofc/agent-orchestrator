@@ -132,7 +132,7 @@ authenticated separately; Agent Orchestrator never stores provider credentials.
 | `devin` | Yes | No | Provider config | Uses a prompt file and accepted-edit sandbox profile. |
 | `grok` | Yes | Yes | Max turns | Uses a prompt file and disables subagents by default. |
 | `gemini` | Yes | No | Provider config | Uses stdin and auto-edit mode. |
-| `opencode` | Provider config | No | Provider config | Uses a process argument, so avoid sensitive task packets. |
+| `opencode` | Yes (`provider/model`) | Yes | Reasoning variant | Uses `opencode run` with the prompt on stdin and an isolated config, so any `opencode/*-free` model works. |
 | `cursor` | Yes | Denied | Provider config | Uses sandboxed headless streaming, live model discovery, and a bundled hook that blocks nested subagents. |
 
 Run the catalog before choosing:
@@ -161,9 +161,22 @@ install the agents you use.
 
 Antigravity uses its official `agy` headless stream protocol, pins `--model`, accepts an optional
 `--agent` and `--effort`, and enables `--sandbox`. The runner sends the complete private task capsule
-as one JSON user event on stdin, so it is not exposed in the process list. It never uses
+as one JSON user event on stdin, so it is not exposed in the process list. It deliberately omits
+`--print`, which takes the prompt as its value and would swallow the next flag. It never uses
 `--dangerously-skip-permissions`; configure narrow Antigravity permission rules for the exact write
 paths and validation commands required by the task.
+
+OpenCode runs as `opencode run --format json --dir <workspace> --model provider/model` and receives the
+task on stdin, so it is not exposed in the process list. Each worker gets a private
+`XDG_CONFIG_HOME` inside its job directory, so it does not inherit your interactive MCP servers or
+plugins: their tool count can exceed the 128 tools a free model's upstream accepts, and workers should
+not receive credentials for unrelated systems. Your global commands (which can inject shell output outside
+the tool permission flow), agents, and MCP servers are therefore not visible to workers, while the
+workspace's own `opencode.json` and `.opencode/` still apply. Provider credentials live in
+`XDG_DATA_HOME` and still apply. List models with `catalog --cli opencode`; free ones end in `-free` (for example
+`opencode/big-pickle`). This was verified on OpenCode 1.18.x. The OpenCode docs describe a newer
+release with a shared background service; if your version reuses a shared server, a worker would run
+with that server's configuration, so also check whether it offers `--standalone`.
 
 Cursor uses `cursor-agent` in sandboxed headless streaming mode and loads the bundled guard that
 denies nested subagents. Cursor may require a one-time interactive trust decision for each project
@@ -299,8 +312,8 @@ python3 plugins/agent-orchestrator/scripts/cli_agent_job.py set-executors <plan-
   --json
 ```
 
-`CLI=MODEL` is exact. A bare CLI is permitted only for adapters such as OpenCode that cannot select
-a model themselves, and means the user knowingly approved that configured default. Astra, Fable,
+`CLI=MODEL` is exact. A bare CLI is permitted only for adapters such as DeepSeek Harness that cannot
+select a model themselves, and means the user knowingly approved that configured default. Astra, Fable,
 Opus, and other known expensive/frontier choices in a custom pool belong under
 `--expensive-executor`, which records that the user accepted execution cost rather than merely
 using that model to plan or review. Automatic `quality-first` is the narrow exception for Sol/Opus

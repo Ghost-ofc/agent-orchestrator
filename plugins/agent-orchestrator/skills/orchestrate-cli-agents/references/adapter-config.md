@@ -45,6 +45,11 @@ Each adapter accepts these fields:
 - `cost_args` (optional): argv appended when `--max-cost-usd` is supplied. Use `{max_cost_usd}`.
 - `reasoning_effort_args` (optional): argv appended when `--reasoning-effort` is supplied. Use
   `{reasoning_effort}`. Advertise only effort values supported by that CLI and model.
+- `env` (optional): extra environment variables for the worker process, at most 16, names `A-Z0-9_`.
+  Values may use `{workspace}`, `{channel_dir}`, `{plugin_root}`, `{job_dir}`, and `{prompt_file}`;
+  directories under `{job_dir}` are created privately. `PATH`, `HOME`, `USER`, `SHELL`, `LD_*`,
+  `DYLD_*`, `PYTHONPATH`, `NODE_OPTIONS`, and `AGENT_ORCHESTRATOR_HOME` cannot be set. Use it to
+  isolate a CLI's configuration, never to pass credentials.
 - `non_git_args` (optional): argv appended only when the workspace is not inside a Git work tree.
   Use it solely to skip a CLI's own "trusted repository" startup check (Codex needs
   `--skip-git-repo-check`); never use it to loosen the sandbox or approval mode. Without a Git

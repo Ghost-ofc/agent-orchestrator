@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Fix the Antigravity adapter: it passed `--print` before `--input-format`, but in `agy` `--print` takes
+  the prompt as its value and swallowed the next flag, so every run failed. The documented stdin
+  stream-json form needs no `--print`. No permission-bypass flag is added.
+- Fix the OpenCode adapter, which used the removed legacy CLI (`--cwd`, `--quiet`, `--prompt`) and could
+  not select a model, so free models were unusable. It now runs `opencode run --format json --dir <ws>
+  --model provider/model` with the task on stdin (no longer visible in the process list), and supports
+  `--agent` and `--variant`.
+- Workers started by the OpenCode adapter get a private `XDG_CONFIG_HOME` per job (new `env` profile key,
+  validated: no `PATH`, `LD_*`, `HOME`, and similar). The person's global MCP servers pushed the tool count
+  past the 128 a free model's upstream accepts and exposed unrelated credentials to workers.
+- Show OpenCode and Antigravity output in the panel (messages, tool calls, written files) and report
+  OpenCode usage by summing its per-step token and cost events.
 - Redesign the local dashboard as a control center: a global status summary, an attention tray for
   worker questions and pending reviews, and a pannable, zoomable canvas that draws project, plan,
   and job relationships only from recorded data, with an equivalent accessible list view.
