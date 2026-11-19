@@ -13,6 +13,15 @@
   the loopback-only boundary, token authentication, and CSP are unchanged.
 - Add tests that every interface string key and every runner state or event has a Spanish label,
   and that animation stays on `transform`/`opacity`.
+- Show what the agent actually did: a read-only transcript endpoint (`/api/projects/<id>/jobs/<id>/transcript`)
+  extracts messages, tool calls, and the final result from `stdout.log` (Claude `stream-json`, Codex
+  `--json`, plain text), bounded in size and cached by an etag. Model reasoning is never displayed.
+- Explain empty sections instead of printing "Unavailable": no Git baseline, files written through agent
+  tools, review notes and test evidence, deduplicated usage with cost, duration, turns, and cache, and the
+  runner's error output as the failure reason.
+- Codex jobs in a workspace that is not a Git repository now pass `--skip-git-repo-check` (new
+  `non_git_args` profile key). The Codex sandbox stays `workspace-write`; only the trusted-directory
+  startup check is skipped. Previously these jobs failed immediately.
 
 ## 0.7.1 - 2026-09-14
 

@@ -371,6 +371,9 @@ BUILTIN_PROFILES: dict[str, dict[str, Any]] = {
         ],
         "prompt_transport": "stdin",
         "model_args": ["--model", "{model}"],
+        # Codex refuses to start outside a trusted Git directory. The workspace was chosen
+        # explicitly and the sandbox stays workspace-write, so only that one check is skipped.
+        "non_git_args": ["--skip-git-repo-check"],
         "models": ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
         "discover_models_argv": ["codex", "debug", "models"],
         "reasoning_effort_args": [
@@ -990,6 +993,7 @@ def validate_profile(name: str, raw: Any) -> dict[str, Any]:
         "max_turns_args",
         "cost_args",
         "reasoning_effort_args",
+        "non_git_args",
         "models",
         "cli_agents",
         "discover_models_argv",
@@ -1029,6 +1033,7 @@ def validate_profile(name: str, raw: Any) -> dict[str, Any]:
         "max_turns_args",
         "cost_args",
         "reasoning_effort_args",
+        "non_git_args",
         "models",
         "cli_agents",
         "discover_models_argv",
@@ -1044,6 +1049,7 @@ def validate_profile(name: str, raw: Any) -> dict[str, Any]:
         "max_turns_args",
         "cost_args",
         "reasoning_effort_args",
+        "non_git_args",
         "discover_models_argv",
         "discover_cli_agents_argv",
     }
@@ -1549,6 +1555,20 @@ def replace_placeholders(tokens: list[str], values: dict[str, str]) -> list[str]
     return result
 
 
+def inside_git_worktree(workspace: Path) -> bool:
+    try:
+        check = subprocess.run(
+            ["git", "-C", str(workspace), "rev-parse", "--is-inside-work-tree"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return check.returncode == 0 and check.stdout.strip() == "true"
+
+
 def build_command(
     profile: dict[str, Any],
     workspace: Path,
@@ -1607,6 +1627,8 @@ def build_command(
             )
         values[value_key] = string_value
         argv.extend(profile[profile_key])
+    if profile.get("non_git_args") and not inside_git_worktree(workspace):
+        argv.extend(profile["non_git_args"])
     command = replace_placeholders(argv, values)
     return command, profile["prompt_transport"]
 

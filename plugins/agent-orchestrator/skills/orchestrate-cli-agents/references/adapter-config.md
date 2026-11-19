@@ -45,6 +45,10 @@ Each adapter accepts these fields:
 - `cost_args` (optional): argv appended when `--max-cost-usd` is supplied. Use `{max_cost_usd}`.
 - `reasoning_effort_args` (optional): argv appended when `--reasoning-effort` is supplied. Use
   `{reasoning_effort}`. Advertise only effort values supported by that CLI and model.
+- `non_git_args` (optional): argv appended only when the workspace is not inside a Git work tree.
+  Use it solely to skip a CLI's own "trusted repository" startup check (Codex needs
+  `--skip-git-repo-check`); never use it to loosen the sandbox or approval mode. Without a Git
+  baseline the runner cannot enforce path scopes or list changed files for that job.
 - `display_name`, `description`, `docs_url`, and `install_hint` (optional): user-facing catalog and
   diagnostic metadata. Do not include tokens, private URLs, or machine-specific paths.
 - `maturity` (optional): `stable`, `preview`, or `legacy`. Codex should prefer stable adapters unless

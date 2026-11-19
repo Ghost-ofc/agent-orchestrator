@@ -484,6 +484,35 @@ class CliAgentJobTests(unittest.TestCase):
                 },
             )
 
+    def test_codex_skips_only_the_git_trust_check_outside_git_workspaces(self) -> None:
+        profiles = runner.load_profiles(None)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            plain = root / "plain"
+            plain.mkdir()
+            repo = root / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            task = root / "task.md"
+            task.write_text("bounded task", encoding="utf-8")
+
+            def command_for(profile: str, workspace: Path) -> list[str]:
+                return runner.build_command(
+                    profiles[profile], workspace, task, None, None, None, None, None
+                )[0]
+
+            outside = command_for("codex-cli", plain)
+            inside = command_for("codex-cli", repo)
+            claude = command_for("claude-code", plain)
+        self.assertIn("--skip-git-repo-check", outside)
+        self.assertNotIn("--skip-git-repo-check", inside)
+        self.assertNotIn("--skip-git-repo-check", claude)
+        # The sandbox is untouched: only the trusted-directory check is skipped.
+        self.assertEqual(outside[outside.index("--sandbox") + 1], "workspace-write")
+        self.assertEqual(
+            [token for token in outside if token.startswith("--") and "bypass" in token], []
+        )
+
     def test_cursor_profile_is_sandboxed_and_denies_native_subagents(self) -> None:
         profile = runner.load_profiles(None)["cursor"]
         with tempfile.TemporaryDirectory() as temp:
