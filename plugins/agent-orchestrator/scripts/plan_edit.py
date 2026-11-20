@@ -50,7 +50,7 @@ def write_document(path, content):
 def edit(plan_id, body):
     import panel_actions as actions
     try:
-        actions.only_fields(body, ('revision', 'title', 'goal', 'items'), ('coordinator', 'contract_source'))
+        actions.only_fields(body, ('revision', 'title', 'goal', 'items'), ('coordinator', 'contract_source', 'executors', 'expensive_executors'))
         expected = actions.text(body, 'revision', limit=64, single_line=True)
         title = actions.text(body, 'title', limit=200, single_line=True)
         goal = actions.text(body, 'goal', limit=5000)
@@ -124,6 +124,10 @@ def edit(plan_id, body):
                     except project_access.AccessError as exc:
                         raise jobs.RunnerError(str(exc)) from exc
             original = copy.deepcopy(plan)
+            if 'executors' in body:
+                new_approved = actions.executors(body, 'executors', maximum=8)
+                new_expensive = actions.executors(body, 'expensive_executors', maximum=4) if 'expensive_executors' in body else []
+                plan['executor_policy'] = jobs.executor_policy(new_approved, new_expensive)
             existing = {item['id']: item for item in plan.get('items', [])}
             allowed = {entry['display'] for entry in plan.get('executor_policy', {}).get('allowed', [])}
             ids, items = set(), []

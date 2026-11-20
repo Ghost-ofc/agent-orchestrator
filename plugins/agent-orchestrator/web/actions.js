@@ -943,9 +943,48 @@ window.AOActions = ctx => {
       editing = { project, plan: planId, revision: plan.edit_revision, allowed: plan.executor_policy.allowed.map(entry => entry.display), items: plan.items.map(item => ({ ...item })) };
       element.elements.title.value = plan.title || '';
       element.elements.goal.value = plan.goal.objective || '';
+      try {
+        const data = await loadCatalog(element);
+        if (data) {
+          const access = await api(`/api/projects/${project}/access`);
+          await setupHarnessModels('plan-edit', data.harnesses, access.policy);
+        }
+      } catch (_) {}
+      renderEditExecutors();
       renderEditTasks(); element.querySelector('[type=submit]').disabled = false; $('plan-edit-add').disabled = false;
     } catch (error) { showError(element, error); }
   }
+  function renderEditExecutors() {
+    if (!editing) return;
+    const list = $('plan-edit-executors-list');
+    list.replaceChildren(...editing.allowed.map((spec, idx) => {
+      const li = node('li', spec + ' ');
+      const del = node('button', '×', 'btn-subtle'); del.type = 'button';
+      del.style.marginLeft = '8px';
+      del.title = t('dialog.cancel');
+      del.addEventListener('click', () => {
+        editing.allowed.splice(idx, 1);
+        renderEditExecutors();
+        renderEditTasks();
+      });
+      li.append(del);
+      return li;
+    }));
+  }
+  $('plan-edit-add-executor').addEventListener('click', () => {
+    if (!editing) return;
+    const cli = $('plan-edit-harness').value;
+    let model;
+    try { model = selectedModel('plan-edit'); } catch (error) { showError(form('plan-edit'), error); return; }
+    if (!cli) return;
+    const spec = model ? `${cli}=${model}` : cli;
+    if (!editing.allowed.includes(spec)) {
+      editing.allowed.push(spec);
+      renderEditExecutors();
+      renderEditTasks();
+    }
+    $('plan-edit-model').value = '';
+  });
   function renderEditTasks() {
     if (!editing) return;
     $('plan-edit-tasks').replaceChildren(...editing.items.map((item, index) => {
@@ -980,7 +1019,8 @@ window.AOActions = ctx => {
     const title = element.elements.title.value.trim(); const goal = element.elements.goal.value.trim();
     if (!title || !goal || !editing.items.length || editing.items.some(item => !item.title.trim())) throw problem('planEdit.required');
     await api(`/api/projects/${editing.project}/plans/${editing.plan}/edit`, { revision: editing.revision, title, goal,
-      items: editing.items.map(item => ({ id: item.id, title: item.title, task: item.task || '', assigned_executor: item.assigned_executor || null })) });
+      executors: editing.allowed,
+      items: editing.items.map(item => ({ id: item.id, title: item.title, task: item.task || '', assigned_executor: item.assigned_executor || null, depends_on: item.depends_on || [] })) });
     state.pendingPlan = editing.plan;
   });
   async function openSupervision(plan) {

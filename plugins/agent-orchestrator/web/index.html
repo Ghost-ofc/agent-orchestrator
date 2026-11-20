@@ -284,6 +284,15 @@
       <p class="muted" data-i18n="planEdit.help"></p>
       <label for="plan-edit-title" data-i18n="plan.fieldTitle"></label><input id="plan-edit-title" name="title" maxlength="200" required>
       <label for="plan-edit-goal" data-i18n="plan.fieldGoal"></label><textarea id="plan-edit-goal" name="goal" rows="3" maxlength="5000" required></textarea>
+      <details id="plan-edit-executors-details">
+        <summary data-i18n="plan.executors"></summary>
+        <div class="add-executor">
+          <select id="plan-edit-harness"></select>
+          <input id="plan-edit-model" type="text" maxlength="128" data-i18n-placeholder="plan.modelPlaceholder">
+          <button type="button" id="plan-edit-add-executor" data-i18n="plan.addExecutor"></button>
+        </div>
+        <ul id="plan-edit-executors-list" class="plan-executors"></ul>
+      </details>
       <div id="plan-edit-tasks"></div>
       <button id="plan-edit-add" type="button" data-i18n="planEdit.add"></button>
       <div class="form-error" role="alert"></div>
