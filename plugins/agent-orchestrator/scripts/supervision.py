@@ -88,9 +88,26 @@ def final_text(path):
 
 def decision(path):
     raw = final_text(path).strip()
-    if raw.startswith('```'):
-        raw = re.sub(r'^```(?:json)?\s*|\s*```$', '', raw)
-    value = json.loads(raw)
+    decoder = json.JSONDecoder()
+    pos = 0
+    found = []
+    while True:
+        idx = raw.find('{', pos)
+        if idx == -1:
+            break
+        try:
+            obj, end_pos = decoder.raw_decode(raw, idx)
+            if isinstance(obj, dict) and obj.get('action') in {'answer', 'accepted', 'repair_required', 'needs_user'}:
+                found.append(obj)
+            pos = end_pos
+        except Exception:
+            pos = idx + 1
+    if not found:
+        if raw.startswith('```'):
+            raw = re.sub(r'^```(?:json)?\s*|\s*```$', '', raw)
+        value = json.loads(raw)
+    else:
+        value = found[-1]
     if not isinstance(value, dict) or value.get('action') not in {'answer', 'accepted', 'repair_required', 'needs_user'}:
         raise jobs.RunnerError('Respuesta de supervisión inválida.')
     for key in ('summary', 'reason'):
@@ -156,7 +173,7 @@ def report(plan, state):
         ids = item.get('job_ids', [])
         path = jobs.job_dir(ids[-1]) if ids else None
         review = jobs.read_json(path / 'review.json') if path and (path / 'review.json').exists() else {}
-        rows.append({'title': item['title'], 'state': item['state'], 'job_id': ids[-1] if ids else None,
+        rows.append({'id': item.get('id'), 'title': item['title'], 'state': item['state'], 'job_id': ids[-1] if ids else None,
                      'delivery': final_text(path)[:5000] if path else '', 'verdict': review.get('verdict'),
                      'reviewer': review.get('reviewer'), 'tests': review.get('tests', []), 'review': review.get('notes', '')[:5000]})
     pending = [op for op in state.get('operations', {}).values() if op.get('state') == 'needs_user']

@@ -521,6 +521,8 @@
 
     'actions.label': 'Acciones del trabajo',
     'actions.cancel': 'Cancelar trabajo',
+    'actions.deleteJob': 'Eliminar del lienzo',
+    'actions.confirmDeleteJob': '¿Eliminar este bloque del lienzo?',
     'actions.review': 'Registrar revisión',
     'actions.retry': 'Reintentar',
     'dialog.close': 'Cerrar',
@@ -550,6 +552,8 @@
     'plan.none': 'Este proyecto aún no tiene planes.',
     'plan.detailLabel': 'Detalle del plan',
     'plan.loading': 'Cargando plan…',
+    'plan.delete': 'Eliminar plan',
+    'plan.confirmDelete': '¿Eliminar el plan «{title}» y sus tareas del lienzo?',
     'plan.back': '← Volver al proyecto',
     'plan.executors': 'Ejecutores aprobados',
     'plan.noExecutors': 'Ningún ejecutor aprobado: el motor elige según la estrategia.',

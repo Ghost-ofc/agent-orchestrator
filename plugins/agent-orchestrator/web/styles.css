@@ -340,6 +340,7 @@ dialog[open] { animation: panel-in 200ms var(--salida); }
 .form-error { padding: var(--s2) var(--s3); background: rgba(239, 111, 102, .08); border: 1px solid rgba(239, 111, 102, .45); border-radius: var(--r-s); }
 .form-error:empty { display: none; }
 .engine-detail { margin-top: var(--s2); max-height: 140px; }
+.supervision-panel .engine-detail { max-height: 420px; white-space: pre-wrap; word-break: break-word; }
 
 /* ---------- Movimiento: solo transform y opacity ---------- */
 @keyframes node-in { from { opacity: 0; } }

@@ -337,15 +337,28 @@ window.AOActions = ctx => {
     if (job?.active) items.push({ key: 'cancel', label: t('actions.cancel'), className: 'danger' });
     if (job && REVIEWABLE.has(job.state)) items.push({ key: 'review', label: t('actions.review'), className: 'primary' });
     if (job?.plan_id && job.checklist_item && (FAILURE.has(job.state) || RETRYABLE.has(job.state))) items.push({ key: 'retry', label: t('actions.retry'), className: '' });
+    if (!job?.active) items.push({ key: 'delete', label: t('actions.deleteJob'), className: 'danger' });
     bar.hidden = items.length === 0;
     reconcile(bar, items, item => item.key, item => {
       const button = node('button'); button.type = 'button';
-      button.addEventListener('click', () => ({ cancel: openCancel, review: openReview, retry: openRetry, proposal: openProposal })[item.key]());
+      button.addEventListener('click', () => ({ cancel: openCancel, review: openReview, retry: openRetry, proposal: openProposal, delete: deleteJob })[item.key]());
       return button;
     }, (button, item) => { button.textContent = item.label; button.className = item.className; });
   }
   function openCancel() { open('cancel'); }
   function openReview() { open('review'); }
+  async function deleteJob() {
+    if (!confirm(t('actions.confirmDeleteJob'))) return;
+    try {
+      await api(projectPath(`/jobs/${state.agent}/delete`), { confirm: true });
+      state.agent = null;
+      clearInspector();
+      document.body.classList.remove('inspector-open');
+      await ctx.refresh();
+    } catch (err) {
+      showError($('actions'), err);
+    }
+  }
   wire('cancel', async element => {
     await api(projectPath(`/jobs/${state.agent}/cancel`), { force: element.elements.force.checked });
   });
@@ -407,6 +420,27 @@ window.AOActions = ctx => {
     let editStatus = section.querySelector('.plan-edit-status');
     if (!editStatus) { editStatus = node('small', null, 'plan-edit-status muted'); editButton.after(editStatus); }
     editStatus.textContent = editButton.title; editStatus.hidden = Boolean(plan.can_edit);
+    let deletePlanButton = section.querySelector('.delete-plan-button');
+    if (!deletePlanButton) {
+      deletePlanButton = node('button', t('plan.delete'), 'delete-plan-button danger'); deletePlanButton.type = 'button';
+      editStatus.after(deletePlanButton);
+    }
+    deletePlanButton.disabled = !plan.can_edit;
+    deletePlanButton.onclick = async () => {
+      if (!confirm(t('plan.confirmDelete', { title: plan.title || plan.plan_id }))) return;
+      deletePlanButton.disabled = true;
+      try {
+        await api(projectPath(`/plans/${plan.plan_id}/delete`), { confirm: true });
+        state.plan = null;
+        clearInspector();
+        document.body.classList.remove('inspector-open');
+        await ctx.refresh();
+      } catch (err) {
+        showError(section, err);
+      } finally {
+        deletePlanButton.disabled = false;
+      }
+    };
     let coordinatorPanel = section.querySelector('.plan-coordinator');
     if (!coordinatorPanel) { coordinatorPanel = node('div', null, 'plan-coordinator'); section.querySelector('.plan-goal').before(coordinatorPanel); }
     coordinatorPanel.replaceChildren(node('strong', t('coordinator.identity', { executor: plan.coordinator?.executor || t('coordinator.none') })));
@@ -419,33 +453,49 @@ window.AOActions = ctx => {
       [t('plan.fieldTopology'), plan.team_policy?.topology], [t('plan.fieldParallel'), plan.team_policy?.max_parallel], [t('plan.attemptLimit'), limit ?? '—']]) meta.append(node('dt', label), node('dd', st('plan', value ?? '')));
     let supervisionPanel = section.querySelector('.supervision-panel');
     if (!supervisionPanel) { supervisionPanel = node('section', null, 'supervision-panel'); section.append(supervisionPanel); }
-    supervisionPanel.replaceChildren(node('h4', t('supervision.title')));
     const supervision = plan.supervision || {};
-    supervisionPanel.append(node('p', t(supervision.enabled ? 'supervision.active' : 'supervision.paused'), 'muted'));
-    {
-      const button = node('button', t(supervision.enabled ? 'supervision.stop' : 'supervision.start')); button.type = 'button';
-      button.addEventListener('click', async () => {
-        button.disabled = true;
-        try {
-          if (supervision.enabled) { await api(`/api/projects/${state.project}/plans/${plan.plan_id}/supervision`, { enabled: false, confirm: true }); await ctx.refresh(); }
-          else await openSupervision(plan);
-        } catch (error) { supervisionPanel.append(node('p', error.message, 'form-error')); }
-        finally { button.disabled = false; }
+    const currentSig = JSON.stringify(supervision);
+    if (supervisionPanel._lastSig !== currentSig) {
+      const openTasks = new Set([...supervisionPanel.querySelectorAll('details[data-task-id][open]')].map(d => d.dataset.taskId));
+      const scrollPositions = new Map();
+      supervisionPanel.querySelectorAll('.engine-detail').forEach((el, idx) => {
+        if (el.scrollTop > 0) scrollPositions.set(idx, el.scrollTop);
       });
-      supervisionPanel.append(button);
-    }
-    if (supervision.error) supervisionPanel.append(node('p', supervision.error, 'form-error'));
-    const report = supervision.report;
-    if (report) {
-      supervisionPanel.append(node('p', report.summary));
-      for (const item of report.tasks || []) {
-        const details = node('details'); details.append(node('summary', `${item.title} · ${item.verdict ? st('state', item.verdict) : t('supervision.pending')}`));
-        details.append(node('h5', t('supervision.agentReport')), node('pre', item.delivery || '—', 'engine-detail'), node('h5', t('supervision.review')), node('pre', item.review || '—', 'engine-detail'));
-        if (item.tests?.length) details.append(node('h5', t('supervision.tests')), node('pre', item.tests.join('\n'), 'engine-detail'));
-        supervisionPanel.append(details);
+      supervisionPanel.replaceChildren(node('h4', t('supervision.title')));
+      supervisionPanel.append(node('p', t(supervision.enabled ? 'supervision.active' : 'supervision.paused'), 'muted'));
+      {
+        const button = node('button', t(supervision.enabled ? 'supervision.stop' : 'supervision.start')); button.type = 'button';
+        button.addEventListener('click', async () => {
+          button.disabled = true;
+          try {
+            if (supervision.enabled) { await api(`/api/projects/${state.project}/plans/${plan.plan_id}/supervision`, { enabled: false, confirm: true }); await ctx.refresh(); }
+            else await openSupervision(plan);
+          } catch (error) { supervisionPanel.append(node('p', error.message, 'form-error')); }
+          finally { button.disabled = false; }
+        });
+        supervisionPanel.append(button);
       }
-      for (const decision of report.decisions || []) supervisionPanel.append(node('p', decision));
-      for (const issue of report.needs_user || []) supervisionPanel.append(node('p', `${t('supervision.user')}: ${issue.reason}`, 'access-boundary'));
+      if (supervision.error) supervisionPanel.append(node('p', supervision.error, 'form-error'));
+      const report = supervision.report;
+      if (report) {
+        supervisionPanel.append(node('p', report.summary));
+        for (const item of report.tasks || []) {
+          const details = node('details');
+          const taskId = item.id || item.title;
+          details.dataset.taskId = taskId;
+          if (openTasks.has(taskId) || (report.tasks.length === 1 && item.state === 'done')) details.open = true;
+          details.append(node('summary', `${item.title} · ${item.verdict ? st('state', item.verdict) : t('supervision.pending')}`));
+          details.append(node('h5', t('supervision.agentReport')), node('pre', item.delivery || '—', 'engine-detail'), node('h5', t('supervision.review')), node('pre', item.review || '—', 'engine-detail'));
+          if (item.tests?.length) details.append(node('h5', t('supervision.tests')), node('pre', item.tests.join('\n'), 'engine-detail'));
+          supervisionPanel.append(details);
+        }
+        for (const decision of report.decisions || []) supervisionPanel.append(node('p', decision));
+        for (const issue of report.needs_user || []) supervisionPanel.append(node('p', `${t('supervision.user')}: ${issue.reason}`, 'access-boundary'));
+      }
+      supervisionPanel.querySelectorAll('.engine-detail').forEach((el, idx) => {
+        if (scrollPositions.has(idx)) el.scrollTop = scrollPositions.get(idx);
+      });
+      supervisionPanel._lastSig = currentSig;
     }
     const allowed = section.querySelector('.plan-executors'); allowed.replaceChildren();
     if (!plan.executor_policy.allowed.length) allowed.append(node('li', t('plan.noExecutors'), 'muted'));
@@ -649,7 +699,7 @@ window.AOActions = ctx => {
     };
     select.onchange = sync; sync();
     element.elements.task.value = template?.task || item.task || buildTemplate(item.title);
-    element.elements.role.value = template?.role || (item.task ? item.title : '');
+    element.elements.role.value = (template?.role || (item.task ? item.title : '')).slice(0, 80);
     element.elements.max_cost_usd.value = template?.max_cost_usd ?? '';
     element.elements.timeout_seconds.value = template?.timeout_seconds || 3600;
     element.elements.allow_paths.value = (template?.scope.allowed_paths || []).join('\n');
@@ -666,7 +716,7 @@ window.AOActions = ctx => {
       allow_paths: lines(element.elements.allow_paths.value), deny_paths: lines(element.elements.deny_paths.value) };
     if (entry.model) body.model = entry.model;
     if (element.elements.access_profile.value) body.access_profile = element.elements.access_profile.value;
-    if (element.elements.role.value.trim()) body.role = element.elements.role.value.trim();
+    if (element.elements.role.value.trim()) body.role = element.elements.role.value.trim().slice(0, 80);
     if (element.elements.max_cost_usd.value) body.max_cost_usd = Number(element.elements.max_cost_usd.value);
     if (element.elements.allow_dirty.checked) body.allow_dirty = true;
     if (element.elements.allow_concurrent_workspace.checked) body.allow_concurrent_workspace = true;

@@ -943,12 +943,35 @@ the blocker.
 """
 
 
-def validate_task_packet(text: str) -> list[str]:
+def extract_markdown_headings(text: str) -> list[tuple[str, int, int]]:
+    clean = []
+    in_code = False
+    for line in text.splitlines(keepends=True):
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_code = not in_code
+            clean.append(" " * (len(line) - 1) + ("\n" if line.endswith("\n") else ""))
+        elif in_code:
+            clean.append(" " * (len(line) - 1) + ("\n" if line.endswith("\n") else ""))
+        else:
+            clean.append(line)
+    masked = "".join(clean)
+    matches = list(re.finditer(r"(?m)^(#{1,6})[ \t]+(.+?)[ \t]*\r?$", masked))
     headings: list[tuple[str, int, int]] = []
-    matches = list(re.finditer(r"(?m)^#{1,6}\s+(.+?)\s*$", text))
-    for index, match in enumerate(matches):
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-        headings.append((match.group(1).strip().casefold(), match.end(), end))
+    for i, m in enumerate(matches):
+        level = len(m.group(1))
+        name = m.group(2).strip()
+        end = len(text)
+        for next_m in matches[i + 1:]:
+            if len(next_m.group(1)) <= level:
+                end = next_m.start()
+                break
+        headings.append((name.casefold(), m.end(), end))
+    return headings
+
+
+def validate_task_packet(text: str) -> list[str]:
+    headings = extract_markdown_headings(text)
     problems: list[str] = []
     for required in REQUIRED_TASK_SECTIONS:
         matching = [entry for entry in headings if entry[0] == required.casefold()]
@@ -963,11 +986,7 @@ def validate_task_packet(text: str) -> list[str]:
 
 
 def validate_named_sections(text: str, required_sections: tuple[str, ...]) -> list[str]:
-    matches = list(re.finditer(r"(?m)^#{1,6}\s+(.+?)\s*$", text))
-    headings: list[tuple[str, int, int]] = []
-    for index, match in enumerate(matches):
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-        headings.append((match.group(1).strip().casefold(), match.end(), end))
+    headings = extract_markdown_headings(text)
     problems: list[str] = []
     for required in required_sections:
         matching = [entry for entry in headings if entry[0] == required.casefold()]
@@ -1843,13 +1862,11 @@ def plan_items(text: str) -> list[dict[str, Any]]:
 
 
 def named_section_body(text: str, name: str) -> str:
-    matches = list(re.finditer(r"(?m)^#{1,6}\s+(.+?)\s*$", text))
-    for index, match in enumerate(matches):
-        if match.group(1).strip().casefold() != name.casefold():
-            continue
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-        return text[match.end() : end].strip()
-    return ""
+    headings = extract_markdown_headings(text)
+    matching = [entry for entry in headings if entry[0] == name.casefold()]
+    if not matching:
+        return ""
+    return text[matching[0][1] : matching[0][2]].strip()
 
 
 def read_plan(plan_id: str) -> tuple[Path, dict[str, Any]]:

@@ -112,6 +112,26 @@ class ContractTests(ActionBase):
             draft, job = self.ready()
             self.assertEqual(draft['state'], 'ready', draft)
 
+    def test_contract_with_surrounding_prose_subheadings_and_code_comments_is_supported(self):
+        rich_contract = CONTRACT.replace(
+            "Detalle de Implementation guidance.",
+            "### Paso 1 — Inspección\n```bash\n# Comentario bash\ncurl -s https://example.invalid\n```\n### Paso 2 — Aplicar cambios"
+        )
+        payload = {"task": rich_contract, "assigned_executor": "claude-code=sonnet"}
+        prose_response = (
+            "He revisado la solicitud y procedo a generar el contrato requerido.\n\n"
+            "```json\n" + json.dumps(payload, ensure_ascii=False) + "\n```\n\n"
+            "---\n\n> **Nota:** He seleccionado `claude-code=sonnet` como ejecutor autorizado."
+        )
+        fake = self.workspace.parent / "bin/claude"
+        fake.write_text("#!/usr/bin/env python3\nimport sys\n"
+                        f"if '--help' in sys.argv:\n print({FLAGS!r})\n sys.exit(0)\n"
+                        "sys.stdin.read()\nprint(" + repr(prose_response) + ")\n")
+        draft, job = self.ready()
+        self.assertEqual(draft['state'], 'ready', draft)
+        self.assertEqual(draft['assigned_executor'], 'claude-code=sonnet')
+        self.assertEqual(draft['task'], rich_contract)
+
     def test_selected_coordinator_profile_is_preserved_for_drafting(self):
         (self.workspace / '.mcp.json').write_text(json.dumps({'mcpServers': {'approved': {'command': '/bin/echo', 'args': ['TEST_ONLY']}}}))
         code, policy = self.post(f'/api/projects/{self.pid}/access', {'enabled': True, 'mcp_servers': ['approved'], 'ssh_hosts': [], 'per_agent': True, 'agent_profiles': {'planner': {'mcp_servers': ['approved'], 'ssh_hosts': []}}})

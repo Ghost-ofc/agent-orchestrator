@@ -22,6 +22,26 @@ def validate_contract(task):
     return task.strip()
 
 
+def extract_contract_payloads(text: str) -> list[dict]:
+    payloads = []
+    if not text or not isinstance(text, str):
+        return payloads
+    decoder = json.JSONDecoder()
+    pos = 0
+    while True:
+        idx = text.find('{', pos)
+        if idx == -1:
+            break
+        try:
+            obj, end_pos = decoder.raw_decode(text, idx)
+            if isinstance(obj, dict) and 'task' in obj and 'assigned_executor' in obj:
+                payloads.append(obj)
+            pos = end_pos
+        except Exception:
+            pos = idx + 1
+    return payloads
+
+
 def view(plan, item, *, include_task=True):
     path = request_path(plan['plan_id'], item['id'])
     if not path.exists():
@@ -42,20 +62,17 @@ def view(plan, item, *, include_task=True):
         raw = handle.read(20001)
     if len(raw) <= 20000:
         candidates.insert(0, raw)
-    for raw in reversed(candidates):
-        try:
-            raw = re.sub(r'^```(?:json)?\s*|\s*```$', '', raw.strip())
-            value = json.loads(raw)
-            if not isinstance(value, dict) or set(value) != {'task', 'assigned_executor'}:
+    for text_block in reversed(candidates):
+        for value in reversed(extract_contract_payloads(text_block)):
+            try:
+                task = validate_contract(value['task'])
+                selected = value['assigned_executor']
+                allowed = {entry['display'] for entry in plan.get('executor_policy', {}).get('allowed', [])}
+                if selected not in allowed or (item.get('assigned_executor') and selected != item['assigned_executor']):
+                    raise jobs.RunnerError('El orquestador eligió un ejecutor distinto de los autorizados para esta tarea.')
+                return {**base, 'state': 'ready', 'assigned_executor': selected, **({'task': task} if include_task else {})}
+            except (ValueError, TypeError, jobs.RunnerError):
                 continue
-            task = validate_contract(value['task'])
-            selected = value['assigned_executor']
-            allowed = {entry['display'] for entry in plan.get('executor_policy', {}).get('allowed', [])}
-            if selected not in allowed or (item.get('assigned_executor') and selected != item['assigned_executor']):
-                raise jobs.RunnerError('El orquestador eligió un ejecutor distinto de los autorizados para esta tarea.')
-            return {**base, 'state': 'ready', 'assigned_executor': selected, **({'task': task} if include_task else {})}
-        except (ValueError, TypeError, jobs.RunnerError):
-            continue
     return {**base, 'state': 'invalid', 'error': 'La respuesta no contiene un contrato completo y una asignación autorizada. Revisa la conversación o vuelve a generarlo.'}
 
 

@@ -285,6 +285,46 @@ def launch_template(job_path: Path) -> dict[str, Any]:
 
 
 # ---------- Actions ----------
+def delete_job(job_id: str, body: Any) -> Any:
+    body = only_fields(body, ("confirm",), ())
+    if body.get("confirm") is not True:
+        raise invalid("confirm", "Confirma la eliminación de la tarea del lienzo.")
+    path = jobs.job_dir(job_id)
+    if not path.exists():
+        return {"job_id": job_id, "deleted": True}
+    status = jobs.get_status(path)
+    if status.get("execution_state") in {"starting", "running", "needs_input", "cancelling"} or status.get("active"):
+        raise ActionError(409, "job_active", "No se puede eliminar una tarea en ejecución. Cancélala primero.")
+    meta_file = path / "meta.json"
+    if meta_file.exists():
+        meta = jobs.read_json(meta_file)
+        meta["dismissed"] = True
+        jobs.write_json(meta_file, meta)
+    if not status.get("plan_id"):
+        import shutil
+        shutil.rmtree(path, ignore_errors=True)
+    return {"job_id": job_id, "deleted": True}
+
+
+def delete_plan(plan_id: str, body: Any) -> Any:
+    body = only_fields(body, ("confirm",), ())
+    if body.get("confirm") is not True:
+        raise invalid("confirm", "Confirma la eliminación del plan del lienzo.")
+    path, plan = jobs.read_plan(plan_id)
+    if plan_edit.active_jobs(plan):
+        raise ActionError(409, "plan_active", "No se puede eliminar un plan con agentes en ejecución.")
+    plan["deleted"] = True
+    jobs.write_json(path / "plan.json", plan)
+    for item in plan.get("items", []):
+        for jid in item.get("job_ids", []):
+            jpath = jobs.job_dir(jid)
+            if (jpath / "meta.json").exists():
+                m = jobs.read_json(jpath / "meta.json")
+                m["dismissed"] = True
+                jobs.write_json(jpath / "meta.json", m)
+    return {"plan_id": plan_id, "deleted": True}
+
+
 def cancel_job(job_id: str, body: Any) -> Any:
     body = only_fields(body, (), ("force",))
     argv = ["cancel", job_id, "--json"]
@@ -387,9 +427,9 @@ def launch_item(workspace: str, plan_id: str, item_id: str, body: Any) -> Any:
     argv = ["launch", f"--cli={cli}", f"--workspace={workspace}", f"--plan-id={plan_id}",
             f"--checklist-item={item_id}", "--json"]
     for key, option in (("model", "--model"), ("role", "--role"), ("group", "--group"), ("cli_agent", "--cli-agent"), ("access_profile", "--access-profile")):
-        value = text(body, key, required=False, limit=128, single_line=True)
+        value = text(body, key, required=False, limit=80 if key in ("role", "group") else 128, single_line=True)
         if value:
-            argv.append(f"{option}={value}")
+            argv.append(f"{option}={value[:80] if key in ('role', 'group') else value}")
     effort = choice(body, "reasoning_effort", REASONING_EFFORTS)
     if effort:
         argv.append(f"--reasoning-effort={effort}")

@@ -246,6 +246,28 @@ class ActionTests(ActionBase):
         self.assertEqual(self.post(answer, {"answer": "x" * 70_000})[0], 413)
         self.assertEqual(self.post(answer, {"answer": "ok", "extra": 1})[0], 400)
 
+    def test_delete_job_and_plan_routes(self):
+        _, plan = self.make_plan()
+        _, job_id = self.finished_job(plan["plan_id"])
+        # Needs confirm
+        self.assertEqual(self.post(f"/api/projects/{self.pid}/jobs/{job_id}/delete", {})[0], 400)
+        # Delete job
+        status, res = self.post(f"/api/projects/{self.pid}/jobs/{job_id}/delete", {"confirm": True})
+        self.assertEqual(status, 200)
+        self.assertTrue(res["deleted"])
+        # Overview hides dismissed job
+        overview = self.request("/api/overview")[1]
+        project = next(p for p in overview["projects"] if p["id"] == self.pid)
+        self.assertNotIn(job_id, [j["job_id"] for j in project["jobs"]])
+        # Delete plan
+        status, res = self.post(f"/api/projects/{self.pid}/plans/{plan['plan_id']}/delete", {"confirm": True})
+        self.assertEqual(status, 200)
+        self.assertTrue(res["deleted"])
+        # Overview hides deleted plan
+        overview = self.request("/api/overview")[1]
+        project = next(p for p in overview["projects"] if p["id"] == self.pid)
+        self.assertNotIn(plan["plan_id"], [p["plan_id"] for p in project["plans"]])
+
 
 FAKE_AGY = """#!/usr/bin/env python3
 import json, sys

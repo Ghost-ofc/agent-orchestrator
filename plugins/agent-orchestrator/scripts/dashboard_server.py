@@ -162,6 +162,7 @@ class DashboardState:
             question['handled_by'] = 'orchestrator' if supervised and op.get('state') != 'needs_user' and not supervision.SENSITIVE.search(question['question']) else 'user'
         row = {
             "job_id": path.name,
+            "dismissed": bool(status.get("dismissed") or jobs.read_json(path / "meta.json").get("dismissed")),
             "supervised": supervised,
             "project_id": pid,
             "source": "worker",
@@ -230,6 +231,8 @@ class DashboardState:
             try:
                 jobs.validate_identifier(path.name, "job")
                 row, detail = self.job(path)
+                if row.get("dismissed") or row.get("role") == "coordinator-contract":
+                    continue
                 ensure_identity(detail["project_id"], detail["project_name"])[
                     "jobs"
                 ].append(row)
@@ -251,6 +254,8 @@ class DashboardState:
         for path in sorted(jobs.plans_dir().glob("*/plan.json")):
             try:
                 plan = jobs.read_json(path)
+                if plan.get("deleted") or plan.get("dismissed"):
+                    continue
                 project = ensure(plan["workspace"])
                 project["plans"].append(
                     {
@@ -627,12 +632,17 @@ class DashboardState:
         registered = visible_project(pid)
         if registered.get("archived") and (parts[3] in {"flows", "plans"}):
             raise panel_actions.ActionError(409, "project_archived", "Restaura el proyecto antes de crear o ejecutar tareas.")
-        if len(parts) == 6 and parts[3] == "jobs" and parts[5] in {"cancel", "review"}:
+        if len(parts) == 6 and parts[3] == "jobs" and parts[5] in {"cancel", "review", "delete", "dismiss"}:
             self.verify_job(pid, parts[4])
             if parts[5] == "cancel":
                 return panel_actions.cancel_job(parts[4], body)
+            if parts[5] in {"delete", "dismiss"}:
+                return panel_actions.delete_job(parts[4], body)
             review = panel_actions.review_job(parts[4], body)
             return {key: review.get(key) for key in ("review_id", "verdict", "reviewer", "reviewed_at", "tests", "notes")}
+        if len(parts) == 6 and parts[3] == "plans" and parts[5] in {"delete", "dismiss"}:
+            self.verified_plan(pid, parts[4])
+            return panel_actions.delete_plan(parts[4], body)
         if len(parts) == 4 and parts[3] == "flows":
             return panel_actions.start_flow(self.project_workspace(pid), body)
         if len(parts) == 7 and parts[3] == "jobs" and parts[5:] == ["flow", "accept"]:
