@@ -411,6 +411,7 @@ class DashboardState:
         project_policy = project_access.policy_for(Path(self.project_workspace(pid)), jobs.state_home())
         result["access_policy"] = project_access.public_policy(project_policy)
         if visible_project(pid).get("archived"):
+            result["can_edit"] = False
             for item in result["items"]:
                 item["can_launch"] = False
         return result
@@ -584,6 +585,9 @@ class DashboardState:
             return self.update_project(parts[2], body)
         if len(parts) < 4 or parts[:2] != ["api", "projects"]:
             raise jobs.RunnerError("Unknown action route")
+        if len(parts) == 6 and parts[3] == 'plans' and parts[5] == 'edit':
+            self.verified_plan(parts[2], parts[4])
+            return panel_actions.plan_view(panel_actions.edit_plan(parts[4], body))
         if len(parts) == 6 and parts[3] == 'plans' and parts[5] == 'supervision':
             _, plan = self.verified_plan(parts[2], parts[4])
             panel_actions.only_fields(body, ('enabled', 'confirm'), ('auto_repair', 'reviewer', 'access_profile'))

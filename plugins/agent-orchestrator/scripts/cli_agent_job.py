@@ -1970,6 +1970,19 @@ def command_preferences(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_edit_plan(args: argparse.Namespace) -> int:
+    import plan_edit
+    source = Path(args.input_file).expanduser().resolve()
+    if not source.is_file() or source.stat().st_size > MAX_TASK_BYTES:
+        raise RunnerError('El archivo de edición no está disponible o supera el tamaño permitido.')
+    try:
+        result = plan_edit.edit(args.plan_id, read_json(source))
+    except plan_edit.jobs.RunnerError as exc:
+        raise RunnerError(str(exc)) from exc
+    print(json.dumps(result, indent=2, sort_keys=True) if args.json else args.plan_id)
+    return 0
+
+
 def command_plan_status(args: argparse.Namespace) -> int:
     _, plan = read_plan(args.plan_id)
     if args.json:
@@ -2271,6 +2284,11 @@ def command_recommend_executors(args: argparse.Namespace) -> int:
 
 
 def command_set_executors(args: argparse.Namespace) -> int:
+    with record_lock(plan_dir(args.plan_id)):
+        return command_set_executors_locked(args)
+
+
+def command_set_executors_locked(args: argparse.Namespace) -> int:
     path, plan = read_plan(args.plan_id)
     policy = executor_policy(
         args.executor, args.expensive_executor, args.terra_fallback_after_seconds
@@ -3029,6 +3047,13 @@ def validate_dependencies(job_ids: list[str]) -> None:
 
 
 def command_launch(args: argparse.Namespace) -> int:
+    if args.plan_id:
+        with record_lock(plan_dir(args.plan_id)):
+            return command_launch_locked(args)
+    return command_launch_locked(args)
+
+
+def command_launch_locked(args: argparse.Namespace) -> int:
     route = apply_launch_route(args)
     workspace = Path(args.workspace).expanduser().resolve()
     task_source = Path(args.task_file).expanduser().resolve()
@@ -3662,6 +3687,14 @@ def update_plan_after_review(meta: dict[str, Any], review: dict[str, Any]) -> No
 
 
 def command_record_review(args: argparse.Namespace) -> int:
+    meta = read_json(job_dir(args.job_id) / 'meta.json')
+    if meta.get('plan_id'):
+        with record_lock(plan_dir(meta['plan_id'])):
+            return command_record_review_locked(args)
+    return command_record_review_locked(args)
+
+
+def command_record_review_locked(args: argparse.Namespace) -> int:
     path = job_dir(args.job_id)
     meta = read_json(path / "meta.json")
     status = get_status(path)
@@ -4157,6 +4190,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     create_plan.add_argument("--json", action="store_true")
     create_plan.set_defaults(func=command_create_plan)
+
+    edit_plan = subparsers.add_parser('edit-plan', help='Edit an idle plan while preserving attempted tasks and revision history')
+    edit_plan.add_argument('plan_id')
+    edit_plan.add_argument('--input-file', required=True)
+    edit_plan.add_argument('--json', action='store_true')
+    edit_plan.set_defaults(func=command_edit_plan)
 
     plan_status = subparsers.add_parser(
         "plan-status", help="Show durable plan decisions and checklist state"

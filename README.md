@@ -138,6 +138,16 @@ Desde **Gestionar proyecto** puedes:
 
 Los proyectos con agentes activos no pueden archivarse ni quitarse. Volver a importar una carpeta recupera su historial y sus restricciones guardadas. El repositorio principal y sus worktrees comparten una identidad de proyecto.
 
+### Editar un plan
+
+Selecciona un plan y pulsa **Editar plan**. Puedes cambiar su título y objetivo, editar el título, contrato y agente de tareas sin iniciar, y añadir o quitar tareas pendientes. Las asignaciones se limitan al conjunto de ejecutores ya autorizado; editar el plan no amplía permisos ni lanza agentes.
+
+Las tareas con ejecuciones, las completadas y sus evidencias conservan su contenido e identidad. Tampoco se pueden quitar tareas con decisiones vinculadas. Para ampliar un trabajo terminado, añade una tarea nueva; cambiar el objetivo de un plan completado requiere trabajo pendiente que lo verifique. Los contratos no se reescriben automáticamente al cambiar el objetivo.
+
+El editor espera a que terminen los agentes y revisores del proyecto. Los proyectos archivados deben restaurarse primero. Si otra pestaña cambia el plan mientras editas, se rechaza la versión antigua y se indica cómo cargar la actual. Cada guardado conserva una copia previa del plan y su documento en `plans/<id>/revisions/`, con permisos privados.
+
+El mismo motor permite editar por CLI mediante `edit-plan ID --input-file cambios.json --json`. El documento de cambios necesita la revisión actual, título, objetivo e ítems con sus IDs; el panel prepara ese formato automáticamente.
+
 ## Modelos y agentes compatibles
 
 | Perfil | Selección de modelo | Observaciones |

@@ -249,6 +249,18 @@
       <footer><button type="button" data-close data-i18n="dialog.cancel"></button><button type="submit" class="primary" data-i18n="flow.start"></button></footer>
     </form>
   </dialog>
+  <dialog id="dlg-plan-edit" aria-labelledby="dlg-plan-edit-title">
+    <form id="form-plan-edit" class="dialog-form wide" novalidate>
+      <header><h2 id="dlg-plan-edit-title" data-i18n="planEdit.title"></h2><button type="button" class="close" data-close data-i18n-aria="dialog.close">&times;</button></header>
+      <p class="muted" data-i18n="planEdit.help"></p>
+      <label for="plan-edit-title" data-i18n="plan.fieldTitle"></label><input id="plan-edit-title" name="title" maxlength="200" required>
+      <label for="plan-edit-goal" data-i18n="plan.fieldGoal"></label><textarea id="plan-edit-goal" name="goal" rows="3" maxlength="5000" required></textarea>
+      <div id="plan-edit-tasks"></div>
+      <button id="plan-edit-add" type="button" data-i18n="planEdit.add"></button>
+      <div class="form-error" role="alert"></div>
+      <footer><button type="button" data-close data-i18n="dialog.cancel"></button><button type="submit" class="primary" data-i18n="projects.save"></button></footer>
+    </form>
+  </dialog>
   <dialog id="dlg-notifications" aria-labelledby="dlg-notifications-title">
     <form id="form-notifications" class="dialog-form" novalidate>
       <header><h2 id="dlg-notifications-title" data-i18n="notifications.title"></h2><button type="button" class="close" data-close data-i18n-aria="dialog.close">&times;</button></header>

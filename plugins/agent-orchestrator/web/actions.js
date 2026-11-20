@@ -18,6 +18,7 @@ window.AOActions = ctx => {
   let launching = null;
   let proposing = null;
   let supervising = null;
+  let editing = null;
   let flowProject = null;
   let managedProject = null;
 
@@ -389,6 +390,17 @@ window.AOActions = ctx => {
       const back = node('button', t('plan.back'), 'link'); back.type = 'button'; back.addEventListener('click', () => ctx.selectOrchestrator());
       section.append(back, node('p', null, 'plan-goal'), node('dl', null, 'plan-meta'), node('h4', t('plan.executors')), node('ul', null, 'plan-executors'), node('h4', t('plan.items')), node('ul', null, 'plan-items'));
     }
+    let editButton = section.querySelector('.edit-plan-button');
+    if (!editButton) {
+      editButton = node('button', t('planEdit.title'), 'edit-plan-button'); editButton.type = 'button';
+      section.querySelector('.plan-goal').before(editButton);
+    }
+    editButton.disabled = !plan.can_edit;
+    editButton.title = plan.can_edit ? '' : t(ctx.selectedProject()?.archived ? 'planEdit.archived' : 'planEdit.active');
+    editButton.onclick = () => openPlanEdit(plan.plan_id);
+    let editStatus = section.querySelector('.plan-edit-status');
+    if (!editStatus) { editStatus = node('small', null, 'plan-edit-status muted'); editButton.after(editStatus); }
+    editStatus.textContent = editButton.title; editStatus.hidden = Boolean(plan.can_edit);
     section.querySelector('.plan-goal').textContent = plan.goal.objective || '';
     const meta = section.querySelector('.plan-meta'); meta.replaceChildren();
     const limit = plan.executor_policy.max_attempts_per_item;
@@ -587,6 +599,57 @@ window.AOActions = ctx => {
       coordinator: value('cli') + (value('model') ? '=' + value('model') : ''), ...(value('access_profile') ? { access_profile: value('access_profile') } : {}), tasks: lines(value('tasks')),
       executors: lines(value('executors')), expensive_executors: lines(value('expensive_executors')), strategy: value('strategy'), risk: value('risk'), confirm: true, supervise: element.elements.supervise.checked, auto_repair: element.elements.supervise.checked && element.elements.auto_repair.checked, allow_dirty: element.elements.allow_dirty.checked });
     state.pendingJob = result.job_id;
+  });
+  async function openPlanEdit(planId) {
+    editing = null; open('plan-edit');
+    const element = form('plan-edit'); element.querySelector('[type=submit]').disabled = true; $('plan-edit-add').disabled = true;
+    $('plan-edit-tasks').replaceChildren();
+    try {
+      const project = state.project;
+      const plan = await api(`/api/projects/${project}/plans/${planId}`);
+      if (!plan.can_edit) throw problem('planEdit.active');
+      editing = { project, plan: planId, revision: plan.edit_revision, allowed: plan.executor_policy.allowed.map(entry => entry.display), items: plan.items.map(item => ({ ...item })) };
+      element.elements.title.value = plan.title || '';
+      element.elements.goal.value = plan.goal.objective || '';
+      renderEditTasks(); element.querySelector('[type=submit]').disabled = false; $('plan-edit-add').disabled = false;
+    } catch (error) { showError(element, error); }
+  }
+  function renderEditTasks() {
+    if (!editing) return;
+    $('plan-edit-tasks').replaceChildren(...editing.items.map((item, index) => {
+      const section = node('details', null, 'plan-edit-task'); section.open = item.id == null;
+      const summary = node('summary', `${index + 1}. ${item.title || t('planEdit.add')}`); section.append(summary);
+      if (!item.editable) section.append(node('p', t('planEdit.locked'), 'muted'));
+      const titleId = `edit-task-title-${index}`; const titleLabel = node('label', t('planEdit.taskTitle')); titleLabel.htmlFor = titleId;
+      const title = node('input'); title.id = titleId; title.maxLength = 300; title.value = item.title || ''; title.readOnly = !item.editable;
+      title.addEventListener('input', () => { item.title = title.value; summary.textContent = `${index + 1}. ${item.title}`; });
+      const taskId = `edit-task-contract-${index}`; const taskLabel = node('label', t('planEdit.contract')); taskLabel.htmlFor = taskId;
+      const task = node('textarea'); task.id = taskId; task.rows = 6; task.maxLength = 200000; task.value = item.task || ''; task.readOnly = !item.editable;
+      task.addEventListener('input', () => { item.task = task.value; });
+      const executorId = `edit-task-executor-${index}`; const executorLabel = node('label', t('planEdit.executor')); executorLabel.htmlFor = executorId;
+      const executor = node('select'); executor.id = executorId; executor.disabled = !item.editable;
+      const choices = ['', ...new Set([...editing.allowed, ...(item.assigned_executor ? [item.assigned_executor] : [])])];
+      executor.replaceChildren(...choices.map(value => { const option = node('option', value || t('planEdit.unassigned')); option.value = value; return option; }));
+      executor.value = item.assigned_executor || '';
+      executor.addEventListener('change', () => { item.assigned_executor = executor.value || null; });
+      section.append(titleLabel, title, taskLabel, task, node('small', t('planEdit.contractHelp'), 'muted'), executorLabel, executor);
+      if (item.editable) {
+        const remove = node('button', t('planEdit.remove')); remove.type = 'button'; remove.addEventListener('click', () => { editing.items.splice(index, 1); renderEditTasks(); }); section.append(remove);
+      }
+      return section;
+    }));
+  }
+  $('plan-edit-add').addEventListener('click', () => {
+    if (!editing || editing.items.length >= 50) return;
+    editing.items.push({ id: null, title: '', task: '', assigned_executor: null, editable: true }); renderEditTasks();
+  });
+  wire('plan-edit', async element => {
+    if (!editing) return;
+    const title = element.elements.title.value.trim(); const goal = element.elements.goal.value.trim();
+    if (!title || !goal || !editing.items.length || editing.items.some(item => !item.title.trim())) throw problem('planEdit.required');
+    await api(`/api/projects/${editing.project}/plans/${editing.plan}/edit`, { revision: editing.revision, title, goal,
+      items: editing.items.map(item => ({ id: item.id, title: item.title, task: item.task || '', assigned_executor: item.assigned_executor || null })) });
+    state.pendingPlan = editing.plan;
   });
   async function openSupervision(plan) {
     supervising = { project: state.project, plan: plan.plan_id };

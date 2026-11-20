@@ -24,6 +24,7 @@ from typing import Any, Iterator
 import cli_agent_job as jobs
 import project_access
 import supervision
+import plan_edit
 
 ENGINE = Path(jobs.__file__).resolve()
 REVIEWER = "dashboard-user"
@@ -206,6 +207,7 @@ def plan_view(plan: dict[str, Any]) -> dict[str, Any]:
                 "state": item.get("state"),
                 "job_ids": item.get("job_ids", []),
                 "task": item.get("task"),
+                "editable": plan_edit.editable(item),
                 "assigned_executor": item.get("assigned_executor"),
                 "attempts": attempts,
                 "can_launch": item.get("state") != "done" and not (isinstance(limit, int) and attempts >= limit),
@@ -217,9 +219,14 @@ def plan_view(plan: dict[str, Any]) -> dict[str, Any]:
             }
         )
     fallback = policy.get("fallback") or {}
+    supervision_view = supervision.public_state(plan['plan_id'])
+    if supervision_view.get('report') and supervision_view['report'].get('plan_revision') != plan_edit.revision(plan):
+        supervision_view['report'] = supervision.report(plan, supervision.read_state(plan['plan_id']))
     return {
         "plan_id": plan.get("plan_id"),
         "title": plan.get("title"),
+        "edit_revision": plan_edit.revision(plan),
+        "can_edit": not bool(plan_edit.active_jobs(plan)),
         "complete": bool(plan.get("complete")),
         "counts": plan.get("counts", {}),
         "created_at": plan.get("created_at"),
@@ -238,7 +245,7 @@ def plan_view(plan: dict[str, Any]) -> dict[str, Any]:
             ],
             "fallback": {key: fallback.get(key) for key in ("enabled", "cli", "model", "user_preapproved")},
         },
-        "supervision": supervision.public_state(plan["plan_id"]),
+        "supervision": supervision_view,
         "items": items,
     }
 
@@ -344,6 +351,17 @@ def create_plan(workspace: str, body: Any, *, plan_id: str | None = None) -> Any
     argv += [f"--expensive-executor={spec}" for spec in expensive]
     with private_text_file(document + "\n") as plan_file:
         return run_engine([*argv, f"--plan-file={plan_file}"])
+
+
+def edit_plan(plan_id: str, body: Any) -> Any:
+    only_fields(body, ('revision', 'title', 'goal', 'items'))
+    with private_text_file(json.dumps(body, ensure_ascii=False)) as source:
+        try:
+            return run_engine(['edit-plan', plan_id, f'--input-file={source}', '--json'])
+        except ActionError as exc:
+            if exc.message.startswith(('plan_conflict:', 'plan_active:')):
+                raise ActionError(409, 'plan_conflict', exc.message.split(': ', 1)[-1]) from exc
+            raise
 
 
 def launch_item(workspace: str, plan_id: str, item_id: str, body: Any) -> Any:

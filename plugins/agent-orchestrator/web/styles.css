@@ -502,3 +502,10 @@ dialog[open] { animation: panel-in 200ms var(--salida); }
   .topbar-end { gap: 4px; }
   .topbar-end button, .attention summary { padding-inline: 8px; }
 }
+
+#plan-edit-tasks { display: grid; gap: 12px; min-width: 0; }
+.plan-edit-task { padding: 12px; border: 1px solid var(--hilo-fuerte); border-radius: var(--r-s); min-width: 0; }
+.plan-edit-task summary { overflow-wrap: anywhere; cursor: pointer; }
+.plan-edit-task label { display: block; margin: 12px 0 6px; }
+.plan-edit-task input, .plan-edit-task textarea, .plan-edit-task select { width: 100%; min-width: 0; }
+.plan-edit-task button { margin-top: 12px; }

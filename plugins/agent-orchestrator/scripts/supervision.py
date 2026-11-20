@@ -161,7 +161,7 @@ def report(plan, state):
                      'reviewer': review.get('reviewer'), 'tests': review.get('tests', []), 'review': review.get('notes', '')[:5000]})
     pending = [op for op in state.get('operations', {}).values() if op.get('state') == 'needs_user']
     complete = bool(plan.get('complete'))
-    return {'state': 'complete' if complete else 'needs_user' if pending else 'in_progress',
+    return {'plan_revision': hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(',', ':')).encode()).hexdigest(), 'plan_updated_at': plan.get('updated_at'), 'state': 'complete' if complete else 'needs_user' if pending else 'in_progress',
             'summary': f"{sum(row['state'] == 'done' for row in rows)} de {len(rows)} tareas aceptadas con revisión. " + ('Plan completado.' if complete else 'El plan sigue abierto.'),
             'tasks': rows, 'decisions': [op['notes'] for op in state.get('operations', {}).values() if op.get('notes')],
             'needs_user': [{'job_id': op['target'], 'reason': op.get('notes')} for op in pending]}
