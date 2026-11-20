@@ -73,11 +73,12 @@ def edit(plan_id, body):
             raise actions.invalid('items', 'El plan necesita entre 1 y 50 tareas.')
         clean = []
         for row in rows:
-            actions.only_fields(row, ('id', 'title', 'task', 'assigned_executor'))
+            actions.only_fields(row, ('id', 'title', 'task', 'assigned_executor'), ('depends_on',))
             clean.append({'id': actions.text(row, 'id', required=False, limit=128, single_line=True),
                           'title': actions.text(row, 'title', limit=300, single_line=True),
                           'task': actions.text(row, 'task', required=False, limit=200000) or '',
-                          'assigned_executor': actions.text(row, 'assigned_executor', required=False, limit=200, single_line=True)})
+                          'assigned_executor': actions.text(row, 'assigned_executor', required=False, limit=200, single_line=True),
+                          'depends_on': [str(d) for d in (row.get('depends_on') or []) if isinstance(d, str)]})
     except actions.ActionError as exc:
         raise jobs.RunnerError(str(exc)) from exc
     registry_path = jobs.state_home() / 'projects.json'
@@ -90,13 +91,20 @@ def edit(plan_id, body):
                 raise jobs.RunnerError('plan_conflict: El plan cambió desde que abriste el editor. Cierra y vuelve a abrir Editar plan para cargar la versión actual.')
             if body.get('contract_source') is not None:
                 try:
-                    source = actions.only_fields(body['contract_source'], ('item_id', 'job_id'))
-                    source_item = actions.text(source, 'item_id', limit=64, single_line=True)
-                    jobs.validate_identifier(source_item, 'item')
-                    source_job = actions.text(source, 'job_id', limit=64, single_line=True)
-                    request = jobs.read_json(path / 'contracts' / (source_item + '.json'))
-                    if request.get('job_id') != source_job or request.get('revision') != expected:
-                        raise jobs.RunnerError('plan_conflict: Hay un borrador más reciente. Vuelve a abrir el contrato para revisarlo.')
+                    if 'batch' in body['contract_source']:
+                        source = actions.only_fields(body['contract_source'], ('batch', 'job_id'))
+                        source_job = actions.text(source, 'job_id', limit=64, single_line=True)
+                        request = jobs.read_json(path / 'contracts' / 'batch.json')
+                        if request.get('job_id') != source_job or request.get('revision') != expected:
+                            raise jobs.RunnerError('plan_conflict: Hay un borrador más reciente. Vuelve a revisarlo.')
+                    else:
+                        source = actions.only_fields(body['contract_source'], ('item_id', 'job_id'))
+                        source_item = actions.text(source, 'item_id', limit=64, single_line=True)
+                        jobs.validate_identifier(source_item, 'item')
+                        source_job = actions.text(source, 'job_id', limit=64, single_line=True)
+                        request = jobs.read_json(path / 'contracts' / (source_item + '.json'))
+                        if request.get('job_id') != source_job or request.get('revision') != expected:
+                            raise jobs.RunnerError('plan_conflict: Hay un borrador más reciente. Vuelve a abrir el contrato para revisarlo.')
                 except actions.ActionError as exc:
                     raise jobs.RunnerError(str(exc)) from exc
             registry = jobs.read_json(registry_path) if registry_path.exists() else {}
@@ -141,6 +149,8 @@ def edit(plan_id, body):
                     if problems:
                         raise jobs.RunnerError('Contrato de tarea incompleto: ' + '; '.join(problems))
                 item.update(title=row['title'], task=row['task'], assigned_executor=row['assigned_executor'])
+                if 'depends_on' in row:
+                    item['depends_on'] = row['depends_on']
                 items.append(item)
             removed = set(existing) - ids
             linked = {record.get('checklist_item') for record in jobs.read_feedback() if record.get('plan_id') == plan_id}

@@ -500,28 +500,101 @@ window.AOActions = ctx => {
     const allowed = section.querySelector('.plan-executors'); allowed.replaceChildren();
     if (!plan.executor_policy.allowed.length) allowed.append(node('li', t('plan.noExecutors'), 'muted'));
     plan.executor_policy.allowed.forEach(entry => allowed.append(node('li', entry.display)));
+    let batchButton = section.querySelector('.batch-contracts-button');
+    if (!batchButton) {
+      batchButton = node('button', t('contract.batchGenerate'), 'batch-contracts-button primary');
+      batchButton.type = 'button';
+      section.querySelector('.plan-items').before(batchButton);
+    }
+    const pendingEditable = plan.items.filter(i => i.editable && !i.contract_ready);
+    batchButton.hidden = pendingEditable.length === 0;
+    const batchDraft = plan.batch_contract_draft;
+    if (batchDraft?.state === 'running') {
+      batchButton.disabled = true;
+      batchButton.textContent = t('contract.batchGenerating');
+      startBatchPolling(plan.plan_id, batchButton);
+    } else {
+      batchButton.disabled = !plan.can_edit;
+      batchButton.textContent = t('contract.batchGenerate');
+    }
+    batchButton.onclick = async () => {
+      if (!confirm(t('contract.batchConfirm', { count: pendingEditable.length, executor: plan.coordinator?.executor || t('coordinator.none') }))) return;
+      batchButton.disabled = true;
+      batchButton.textContent = t('contract.batchGenerating');
+      try {
+        await api(projectPath(`/plans/${plan.plan_id}/contracts/batch`), { confirm: true });
+        startBatchPolling(plan.plan_id, batchButton);
+      } catch (err) {
+        batchButton.disabled = false;
+        batchButton.textContent = t('contract.batchGenerate');
+        showError(section, err);
+      }
+    };
     reconcile(section.querySelector('.plan-items'), plan.items, item => item.id, () => {
       const li = node('li', null, 'plan-item');
       const head = node('div', null, 'plan-item-head'); head.append(dot('neutral'), node('strong'), node('small'));
       const launch = node('button', t('plan.launch'), 'primary'); launch.type = 'button'; launch.addEventListener('click', () => openLaunch(plan.plan_id, li.dataset.key));
       const generate = node('button', t('contract.generate'), 'generate-contract'); generate.type = 'button';
-      li.append(head, node('p', null, 'plan-assignment muted'), node('div', null, 'plan-jobs'), generate, launch); return li;
+      li.append(head, node('p', null, 'plan-assignment muted'), node('p', null, 'plan-dependencies muted'), node('div', null, 'plan-jobs'), generate, launch); return li;
     }, (li, item) => {
       li.querySelector('.dot').className = `dot ${item.state === 'done' ? 'green' : item.state === 'blocked' ? 'red' : item.state === 'in_progress' ? 'blue' : 'neutral'}`;
       li.querySelector('strong').textContent = item.title;
       li.querySelector('small').textContent = `${st('plan', item.state)} · ${tn('plan.attempts', item.attempts)}`;
-      li.querySelector('.primary').hidden = !item.can_launch;
-      li.querySelector('.primary').textContent = t(item.contract_ready || !item.editable ? 'plan.launch' : 'contract.prepare');
+      const launchBtn = li.querySelector('.primary');
+      launchBtn.hidden = item.state === 'done';
+      launchBtn.textContent = t(item.contract_ready || !item.editable ? 'plan.launch' : 'contract.prepare');
+      if (!item.dependencies_met && item.state !== 'done') {
+        launchBtn.disabled = true;
+        launchBtn.title = t('plan.waitingDeps', { deps: (item.dependency_titles || []).join(', ') });
+      } else {
+        launchBtn.disabled = !item.can_launch;
+        launchBtn.title = '';
+      }
       const generate = li.querySelector('.generate-contract'); generate.hidden = !item.editable; generate.disabled = !plan.can_edit && !item.contract_draft;
       generate.textContent = t(item.contract_draft?.state === 'ready' ? 'contract.viewDraft' : 'contract.generate');
       generate.onclick = () => openContract(plan, item);
       li.querySelector('.plan-assignment').textContent = item.assigned_executor || '';
       li.querySelector('.plan-assignment').hidden = !item.assigned_executor;
+      const depsEl = li.querySelector('.plan-dependencies');
+      if (item.depends_on && item.depends_on.length) {
+        depsEl.hidden = false;
+        depsEl.textContent = t('plan.dependsOn', { deps: (item.dependency_titles || []).join(', ') });
+      } else {
+        depsEl.hidden = true;
+      }
       li._item = item;
       reconcile(li.querySelector('.plan-jobs'), item.job_ids, id => id, id => {
         const button = node('button', id, 'job-chip'); button.type = 'button'; button.addEventListener('click', () => ctx.selectAgent(button.dataset.key)); return button;
       }, (button, id) => { button.textContent = projectJobName(id); });
     });
+  }
+  let batchPollTimer = null;
+  function startBatchPolling(planId, button) {
+    if (batchPollTimer) clearTimeout(batchPollTimer);
+    const check = async () => {
+      try {
+        const draft = await api(projectPath(`/plans/${planId}/contracts/batch`));
+        if (draft.state === 'running') {
+          batchPollTimer = setTimeout(check, 2500);
+          return;
+        }
+        if (draft.state === 'ready') {
+          if (button) button.textContent = t('contract.batchReady');
+          await api(projectPath(`/plans/${planId}/contracts/batch/accept`), { confirm: true, job_id: draft.job_id });
+          await ctx.refresh();
+          return;
+        }
+        if (draft.state === 'failed' || draft.state === 'invalid') {
+          alert(draft.error || 'Error al generar los contratos.');
+          await ctx.refresh();
+          return;
+        }
+      } catch (err) {
+        console.error('Batch contract poll error:', err);
+        await ctx.refresh();
+      }
+    };
+    batchPollTimer = setTimeout(check, 2000);
   }
   const projectJobName = id => { const job = ctx.selectedProject()?.jobs.find(entry => entry.job_id === id); return job ? `${agentName(job)} · ${st('state', job.state)}` : id; };
 

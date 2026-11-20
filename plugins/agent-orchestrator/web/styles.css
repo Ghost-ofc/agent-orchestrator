@@ -306,6 +306,8 @@ button.link:hover:not(:disabled) { background: transparent; text-decoration: und
 .plan-meta dt { color: var(--niebla); }
 .plan-executors li { font: 12px var(--mono); }
 .plan-item { display: grid; gap: var(--s2); padding: var(--s3); background: var(--grafito-2); border: 1px solid var(--hilo); border-radius: var(--r-m); }
+.batch-contracts-button { margin-bottom: var(--s2); width: 100%; justify-content: center; }
+.plan-dependencies { font-size: 11px; color: var(--ambar); }
 .plan-item-head { display: flex; align-items: center; gap: var(--s2); }
 .plan-item-head strong { flex: 1; min-width: 0; overflow-wrap: anywhere; font-weight: 500; }
 .plan-item-head small { color: var(--niebla); white-space: nowrap; }

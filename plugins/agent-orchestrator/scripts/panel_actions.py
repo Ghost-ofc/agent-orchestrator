@@ -200,9 +200,22 @@ def plan_view(plan: dict[str, Any]) -> dict[str, Any]:
     policy = plan.get("executor_policy") or {}
     limit = policy.get("max_attempts_per_item")
     items = []
+    item_map = {item.get("id"): item for item in plan.get("items", [])}
     for item in plan.get("items", []):
         attempts = len(item.get("job_ids", []))
         options = jobs.executor_options_for_item(plan, item)
+        depends_on = item.get("depends_on", [])
+        dep_titles = []
+        deps_met = True
+        for dep_id in depends_on:
+            dep_item = item_map.get(dep_id)
+            if dep_item:
+                dep_titles.append(dep_item.get("title") or dep_id)
+                if dep_item.get("state") != "done":
+                    deps_met = False
+            else:
+                deps_met = False
+        can_launch = item.get("state") != "done" and not (isinstance(limit, int) and attempts >= limit) and deps_met
         items.append(
             {
                 "id": item.get("id"),
@@ -210,12 +223,15 @@ def plan_view(plan: dict[str, Any]) -> dict[str, Any]:
                 "state": item.get("state"),
                 "job_ids": item.get("job_ids", []),
                 "task": item.get("task"),
+                "depends_on": depends_on,
+                "dependency_titles": dep_titles,
+                "dependencies_met": deps_met,
                 "editable": plan_edit.editable(item),
                 "contract_ready": bool(item.get('task')) and not jobs.validate_task_packet(item['task']) and '<<completar>>' not in item['task'],
                 "contract_draft": contract_planning.view(plan, item, include_task=False),
                 "assigned_executor": item.get("assigned_executor"),
                 "attempts": attempts,
-                "can_launch": item.get("state") != "done" and not (isinstance(limit, int) and attempts >= limit),
+                "can_launch": can_launch,
                 "allowed": [
                     {key: entry.get(key) for key in ("cli", "model", "display", "expensive_user_approved")}
                     for entry in options.get("allowed", [])
@@ -236,6 +252,7 @@ def plan_view(plan: dict[str, Any]) -> dict[str, Any]:
         "counts": plan.get("counts", {}),
         "created_at": plan.get("created_at"),
         "updated_at": plan.get("updated_at"),
+        "batch_contract_draft": contract_planning.batch_view(plan),
         "goal": {key: (plan.get("goal") or {}).get(key) for key in ("objective", "strategy", "risk", "task_type", "status")},
         "team_policy": plan.get("team_policy"),
         "coordinator": plan.get("coordinator"),
@@ -424,8 +441,18 @@ def launch_item(workspace: str, plan_id: str, item_id: str, body: Any) -> Any:
     if not jobs.AGENT_NAME_RE.fullmatch(cli):
         raise invalid("cli")
     task = text(body, "task", limit=MAX_TASK_CHARS) or ""
+    _, plan = jobs.read_plan(plan_id)
+    target_item = next((it for it in plan.get("items", []) if it.get("id") == item_id), None)
     argv = ["launch", f"--cli={cli}", f"--workspace={workspace}", f"--plan-id={plan_id}",
             f"--checklist-item={item_id}", "--json"]
+    if target_item and target_item.get("depends_on"):
+        for dep_id in target_item["depends_on"]:
+            dep_item = next((it for it in plan.get("items", []) if it.get("id") == dep_id), None)
+            if not dep_item or dep_item.get("state") != "done":
+                title = dep_item.get("title") if dep_item else dep_id
+                raise invalid("dependencies", f"Espera a que termine y sea aceptada la tarea previa: {title}")
+            if dep_item.get("job_ids"):
+                argv.append(f"--depends-on={dep_item['job_ids'][-1]}")
     for key, option in (("model", "--model"), ("role", "--role"), ("group", "--group"), ("cli_agent", "--cli-agent"), ("access_profile", "--access-profile")):
         value = text(body, key, required=False, limit=80 if key in ("role", "group") else 128, single_line=True)
         if value:

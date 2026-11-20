@@ -608,6 +608,9 @@ class DashboardState:
             if item is None:
                 raise jobs.RunnerError('Unknown item')
             return panel_actions.plan_view(contract_planning.accept(plan, item, body))
+        if len(parts) == 8 and parts[3] == 'plans' and parts[5:] == ['contracts', 'batch', 'accept']:
+            _, plan = self.verified_plan(parts[2], parts[4])
+            return panel_actions.plan_view(contract_planning.batch_accept(plan, body))
         if len(parts) == 6 and parts[3] == 'plans' and parts[5] == 'edit':
             self.verified_plan(parts[2], parts[4])
             return panel_actions.plan_view(panel_actions.edit_plan(parts[4], body))
@@ -656,6 +659,9 @@ class DashboardState:
             if item is None:
                 raise jobs.RunnerError('Unknown item')
             return contract_planning.start(plan, item, body)
+        if len(parts) == 7 and parts[3] == 'plans' and parts[5:] == ['contracts', 'batch']:
+            _, plan = self.verified_plan(pid, parts[4])
+            return contract_planning.batch_start(plan, body)
         if len(parts) == 8 and parts[3] == "plans" and parts[5] == "items" and parts[7] == "launch":
             _, plan = self.verified_plan(pid, parts[4])
             if not any(item.get("id") == parts[6] for item in plan.get("items", [])):
@@ -842,6 +848,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if item is None:
                     raise jobs.RunnerError('Unknown item')
                 data = contract_planning.view(plan, item) or {'state': 'empty'}
+            elif len(parts) == 7 and parts[:2] == ['api', 'projects'] and parts[3] == 'plans' and parts[5:] == ['contracts', 'batch']:
+                _, plan = self.server.state.verified_plan(parts[2], parts[4])
+                data = contract_planning.batch_view(plan) or {'state': 'empty'}
             elif self.path == "/api/overview":
                 data = self.server.state.overview()
             elif len(parts) == 4 and parts[:2] == ["api", "projects"] and parts[3] == "access":

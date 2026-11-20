@@ -175,3 +175,42 @@ class ContractTests(ActionBase):
         changes['contract_source'] = {'item_id': self.item_id, 'job_id': first}
         self.assertEqual(self.post(self.base + '/edit', changes)[0], 409)
         self.assertFalse(self.plan()['items'][0]['contract_ready'])
+
+    def test_batch_contract_planning_and_dependencies(self):
+        self.assertEqual(self.configure()[0], 200)
+        plan = self.plan()
+        payload = {'revision': plan['edit_revision'], 'title': plan['title'], 'goal': plan['goal']['objective'],
+                   'items': [{'id': plan['items'][0]['id'], 'title': plan['items'][0]['title'], 'task': '', 'assigned_executor': ''},
+                             {'id': '', 'title': 'Segunda tarea de verificación', 'task': '', 'assigned_executor': ''}]}
+        code, edited = self.post(self.base + '/edit', payload)
+        self.assertEqual(code, 200, edited)
+        item1_id = edited['items'][0]['id']
+        item2_id = edited['items'][1]['id']
+
+        batch_output = {
+            'items': [
+                {'id': item1_id, 'task': CONTRACT, 'assigned_executor': 'claude-code=sonnet', 'depends_on': []},
+                {'id': item2_id, 'task': CONTRACT, 'assigned_executor': 'claude-code=sonnet', 'depends_on': [item1_id]}
+            ]
+        }
+        self.reply(batch_output)
+
+        batch_route = self.base + '/contracts/batch'
+        code, started = self.post(batch_route, {'confirm': True})
+        self.assertEqual(code, 200, started)
+        job_id = started['job_id']
+        self.wait_finished(job_id)
+
+        code, draft = self.request(batch_route)
+        self.assertEqual(code, 200, draft)
+        self.assertEqual(draft['state'], 'ready')
+        self.assertEqual(len(draft['items']), 2)
+
+        code, accepted = self.post(batch_route + '/accept', {'confirm': True, 'job_id': job_id})
+        self.assertEqual(code, 200, accepted)
+        self.assertTrue(accepted['items'][0]['contract_ready'])
+        self.assertTrue(accepted['items'][1]['contract_ready'])
+        self.assertEqual(accepted['items'][1]['depends_on'], [item1_id])
+        self.assertFalse(accepted['items'][1]['dependencies_met'])
+        self.assertFalse(accepted['items'][1]['can_launch'])
+        self.assertTrue(accepted['items'][0]['can_launch'])
