@@ -244,7 +244,7 @@
     }
     if (item.kind === 'plan') {
       const card = node('button', null, 'node node-plan'); card.type = 'button';
-      card.append(node('small', t('canvas.plan'), 'node-kicker'), node('strong', null, 'node-name'), node('progress'), node('small', null, 'node-meta'));
+      card.append(node('small', t('canvas.plan'), 'node-kicker'), node('strong', null, 'node-name'), node('progress'), node('small', null, 'node-meta'), node('small', null, 'node-coordinator'));
       card.addEventListener('click', () => selectPlan(card.dataset.planId));
       return card;
     }
@@ -275,6 +275,7 @@
       card.setAttribute('aria-pressed', String(item.plan.plan_id === state.plan));
       card.querySelector('.node-name').textContent = item.plan.title || item.plan.plan_id;
       card.title = card.querySelector('.node-name').textContent;
+      card.querySelector('.node-coordinator').textContent = t('coordinator.identity', { executor: item.plan.coordinator?.executor || t('coordinator.none') });
       const bar = card.querySelector('progress'); bar.max = total || 1; bar.value = done;
       bar.setAttribute('aria-label', t('canvas.planProgress', { done, total }));
       card.querySelector('.node-meta').textContent = !total ? t('canvas.planNoItems') : item.plan.complete ? t('canvas.planDone') : t('canvas.planProgress', { done, total });

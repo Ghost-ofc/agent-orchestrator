@@ -19,6 +19,7 @@ El panel permite crear proyectos y preparar flujos sin abrir una terminal para c
 
 - [Qué puedes hacer](#qué-puedes-hacer)
 - [Instalación](#instalación)
+- [Elegir orquestador y generar contratos](#elegir-orquestador-y-generar-contratos)
 - [Primer flujo desde el navegador](#primer-flujo-desde-el-navegador)
 - [Supervisión y resumen final](#supervisión-y-resumen-final)
 - [Proyectos y carpetas](#proyectos-y-carpetas)
@@ -87,6 +88,18 @@ python3 plugins/agent-orchestrator/scripts/cli_agent_job.py dashboard-web --no-o
 ```
 
 `Ctrl+C` detiene ese servidor. `--port 0` solicita un puerto libre. El [servicio systemd](#servicio-automático-con-systemd) permite mantenerlo disponible automáticamente.
+
+## Elegir orquestador y generar contratos
+
+Cada plan muestra **Orquestador: sin definir** hasta que eliges uno. Abre el plan y pulsa **Elegir orquestador** para seleccionar CLI, modelo y perfil de acceso. La elección queda visible en el detalle, el nodo del plan y la lista del proyecto. Configurarlo no inicia un agente ni amplía el conjunto de ejecutores; las generaciones que solicites consumirán cuota de esa cuenta.
+
+No necesitas rellenar manualmente `Why`, `Scope` ni las demás secciones. En una tarea pendiente, pulsa **Preparar tarea** o **Generar contrato**, escribe tu objetivo y deja que el orquestador produzca el contrato completo y proponga un ejecutor autorizado. Puedes elegir el orquestador desde ese mismo formulario si todavía no existe.
+
+El borrador incluye objetivo, justificación, alcance, archivos o recursos, pasos, restricciones, aceptación, validación e informe final. Puedes revisarlo y ajustarlo antes de **Guardar contrato en el plan**. Guardarlo conserva una revisión y no ejecuta la tarea; el lanzamiento requiere su propia confirmación. Puedes cerrar el formulario mientras el orquestador trabaja y volver a revisar el resultado.
+
+Los contratos de tareas ya ejecutadas conservan su contenido original. Un borrador incompleto, con marcadores de plantilla, fuera del conjunto autorizado o generado para una versión anterior del plan no se aplica. La planificación pide descubrir los datos faltantes desde la configuración autorizada y preguntar cuando sigan siendo ambiguos, sin inventar destinos DNS, IPs u otros valores.
+
+En **Resumen del proyecto**, **Crear con orquestador** abre directamente el flujo guiado; **Plan manual** permite crear primero un checklist y seleccionar el orquestador después.
 
 ## Primer flujo desde el navegador
 
@@ -162,6 +175,12 @@ El mismo motor permite editar por CLI mediante `edit-plan ID --input-file cambio
 | `gemini` | Explícita | Entrada por stdin y modo de edición automática. |
 | `opencode` | `proveedor/modelo` | Entrada por stdin y configuración aislada; incluye modelos gratuitos disponibles en el proveedor. |
 | `cursor` | Explícita | Streaming, sandbox y hook que bloquea subagentes anidados. Puede requerir confianza interactiva inicial del proyecto. |
+
+Los selectores consultan el catálogo del CLI y muestran nombres junto con sus IDs. OpenCode incluye un filtro **Solo modelos Free**, usando las etiquetas y los metadatos de costes devueltos por el CLI. **Actualizar modelos** renueva la consulta; el servidor mantiene caché durante 120 segundos. Puedes introducir un ID manual cuando el proveedor no ofrece catálogo.
+
+En un proyecto con control MCP/SSH restringido, los demás CLI se muestran con una explicación y permiten consultar sus modelos, pero su lanzamiento sigue bloqueado si no tienen adaptador compatible. El botón **Revisar accesos del proyecto** permite cambiar explícitamente al modo nativo; el panel no desactiva restricciones por su cuenta. El modo nativo usa los controles del CLI y su adaptador, sin aplicar la lista MCP/SSH central.
+
+Fuentes de los comandos de catálogo: [CLI de OpenCode](https://opencode.ai/docs/cli/) y [documentación de Antigravity](https://antigravity.google/docs/cli/headless/). Los modelos disponibles dependen de la instalación y de la cuenta; la etiqueta Free no garantiza condiciones comerciales permanentes.
 
 Consulta la instalación real antes de elegir:
 

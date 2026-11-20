@@ -130,3 +130,20 @@ class FlowTests(ActionBase):
         self.assertTrue(plan['supervision']['auto_repair'])
         self.assertEqual(plan['supervision']['coordinator']['executor'], 'claude-code=sonnet')
         self.assertEqual(self.start(supervise=False, auto_repair=True)[0], 400)
+
+    def test_coordinator_full_contract_is_preserved_in_the_plan(self):
+        from test_panel_actions import CONTRACT
+        self.reply({'tasks': [{**self.task, 'contract': CONTRACT}]})
+        code, started = self.start()
+        self.assertEqual(code, 200, started); self.wait_finished(started['job_id'])
+        code, plan = self.accept(started['job_id'])
+        self.assertEqual(code, 200, plan)
+        self.assertEqual(plan['items'][0]['task'], CONTRACT)
+        self.assertTrue(plan['items'][0]['contract_ready'])
+
+    def test_partial_contract_from_coordinator_is_rejected(self):
+        self.reply({'tasks': [{**self.task, 'contract': '## Objective\nUn objetivo sin las demás secciones.'}]})
+        code, started = self.start()
+        self.assertEqual(code, 200, started); self.wait_finished(started['job_id'])
+        self.assertIn('error', self.proposal(started['job_id'])[1])
+        self.assertEqual(self.accept(started['job_id'])[0], 400)

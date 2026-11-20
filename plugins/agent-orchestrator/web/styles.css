@@ -509,3 +509,15 @@ dialog[open] { animation: panel-in 200ms var(--salida); }
 .plan-edit-task label { display: block; margin: 12px 0 6px; }
 .plan-edit-task input, .plan-edit-task textarea, .plan-edit-task select { width: 100%; min-width: 0; }
 .plan-edit-task button { margin-top: 12px; }
+
+.plan-coordinator { display: grid; gap: 8px; margin: 12px 0; padding: 12px; border: 1px solid var(--hilo-fuerte); border-radius: var(--r-s); }
+.plan-coordinator strong { overflow-wrap: anywhere; }
+.plan-coordinator button, .generate-contract { justify-self: start; }
+.node-coordinator { font: 10px/1.4 var(--mono); color: var(--bruma); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plans-head { flex-wrap: wrap; }
+#contract-proposal { display: grid; gap: 8px; min-width: 0; }
+
+.model-picker { display: grid; gap: 8px; min-width: 0; margin-top: 10px; }
+.model-picker select { width: 100%; min-width: 0; }
+.model-picker p { font-size: 12px; overflow-wrap: anywhere; }
+.model-picker button { justify-self: start; }

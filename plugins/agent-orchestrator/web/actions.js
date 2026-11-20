@@ -19,6 +19,10 @@ window.AOActions = ctx => {
   let proposing = null;
   let supervising = null;
   let editing = null;
+  let coordinating = null;
+  let contracting = null;
+  let contractTimer = null;
+  const modelPickers = new Map();
   let flowProject = null;
   let managedProject = null;
 
@@ -369,9 +373,11 @@ window.AOActions = ctx => {
     let head = section.querySelector('.plans-head');
     if (!head) {
       head = node('div', null, 'plans-head'); head.append(node('h3', t('plan.listTitle')));
-      const create = node('button', t('plan.new')); create.type = 'button'; create.addEventListener('click', openPlan); head.append(create);
+      const flow = node('button', t('coordinator.newFlow'), 'primary'); flow.type = 'button'; flow.addEventListener('click', () => $('new-flow').click()); head.append(flow);
+      const create = node('button', t('coordinator.manual')); create.type = 'button'; create.addEventListener('click', openPlan); head.append(create);
       section.append(head, node('ul', null, 'plan-rows'), node('p', t('plan.none'), 'muted none'));
     }
+    head.querySelectorAll('button').forEach(button => { button.disabled = Boolean(project.archived); });
     section.querySelector('.none').hidden = plans.length > 0;
     reconcile(section.querySelector('.plan-rows'), plans, plan => plan.plan_id, () => {
       const li = node('li'); const button = node('button', null, 'plan-row'); button.type = 'button';
@@ -380,7 +386,7 @@ window.AOActions = ctx => {
     }, (li, plan) => {
       const { done, total } = planCounts(plan);
       li.querySelector('strong').textContent = plan.title || plan.plan_id;
-      li.querySelector('small').textContent = plan.complete ? t('canvas.planDone') : total ? t('canvas.planProgress', { done, total }) : t('canvas.planNoItems');
+      li.querySelector('small').textContent = [plan.complete ? t('canvas.planDone') : total ? t('canvas.planProgress', { done, total }) : t('canvas.planNoItems'), t('coordinator.identity', { executor: plan.coordinator?.executor || t('coordinator.none') })].join(' · ');
     });
   }
   function renderPlanDetail(plan) {
@@ -401,10 +407,15 @@ window.AOActions = ctx => {
     let editStatus = section.querySelector('.plan-edit-status');
     if (!editStatus) { editStatus = node('small', null, 'plan-edit-status muted'); editButton.after(editStatus); }
     editStatus.textContent = editButton.title; editStatus.hidden = Boolean(plan.can_edit);
+    let coordinatorPanel = section.querySelector('.plan-coordinator');
+    if (!coordinatorPanel) { coordinatorPanel = node('div', null, 'plan-coordinator'); section.querySelector('.plan-goal').before(coordinatorPanel); }
+    coordinatorPanel.replaceChildren(node('strong', t('coordinator.identity', { executor: plan.coordinator?.executor || t('coordinator.none') })));
+    const choose = node('button', t(plan.coordinator?.executor ? 'coordinator.change' : 'coordinator.choose')); choose.type = 'button'; choose.disabled = !plan.can_edit;
+    choose.addEventListener('click', () => openCoordinator(plan)); coordinatorPanel.append(choose);
     section.querySelector('.plan-goal').textContent = plan.goal.objective || '';
     const meta = section.querySelector('.plan-meta'); meta.replaceChildren();
     const limit = plan.executor_policy.max_attempts_per_item;
-    for (const [label, value] of [[t('flow.coordinator'), plan.coordinator?.executor || 'Codex'], [t('plan.fieldStrategy'), plan.goal.strategy], [t('plan.fieldRisk'), plan.goal.risk], [t('plan.fieldType'), plan.goal.task_type],
+    for (const [label, value] of [[t('flow.coordinator'), plan.coordinator?.executor || t('coordinator.none')], [t('plan.fieldStrategy'), plan.goal.strategy], [t('plan.fieldRisk'), plan.goal.risk], [t('plan.fieldType'), plan.goal.task_type],
       [t('plan.fieldTopology'), plan.team_policy?.topology], [t('plan.fieldParallel'), plan.team_policy?.max_parallel], [t('plan.attemptLimit'), limit ?? '—']]) meta.append(node('dt', label), node('dd', st('plan', value ?? '')));
     let supervisionPanel = section.querySelector('.supervision-panel');
     if (!supervisionPanel) { supervisionPanel = node('section', null, 'supervision-panel'); section.append(supervisionPanel); }
@@ -443,12 +454,17 @@ window.AOActions = ctx => {
       const li = node('li', null, 'plan-item');
       const head = node('div', null, 'plan-item-head'); head.append(dot('neutral'), node('strong'), node('small'));
       const launch = node('button', t('plan.launch'), 'primary'); launch.type = 'button'; launch.addEventListener('click', () => openLaunch(plan.plan_id, li.dataset.key));
-      li.append(head, node('p', null, 'plan-assignment muted'), node('div', null, 'plan-jobs'), launch); return li;
+      const generate = node('button', t('contract.generate'), 'generate-contract'); generate.type = 'button';
+      li.append(head, node('p', null, 'plan-assignment muted'), node('div', null, 'plan-jobs'), generate, launch); return li;
     }, (li, item) => {
       li.querySelector('.dot').className = `dot ${item.state === 'done' ? 'green' : item.state === 'blocked' ? 'red' : item.state === 'in_progress' ? 'blue' : 'neutral'}`;
       li.querySelector('strong').textContent = item.title;
       li.querySelector('small').textContent = `${st('plan', item.state)} · ${tn('plan.attempts', item.attempts)}`;
       li.querySelector('.primary').hidden = !item.can_launch;
+      li.querySelector('.primary').textContent = t(item.contract_ready || !item.editable ? 'plan.launch' : 'contract.prepare');
+      const generate = li.querySelector('.generate-contract'); generate.hidden = !item.editable; generate.disabled = !plan.can_edit && !item.contract_draft;
+      generate.textContent = t(item.contract_draft?.state === 'ready' ? 'contract.viewDraft' : 'contract.generate');
+      generate.onclick = () => openContract(plan, item);
       li.querySelector('.plan-assignment').textContent = item.assigned_executor || '';
       li.querySelector('.plan-assignment').hidden = !item.assigned_executor;
       li._item = item;
@@ -467,6 +483,92 @@ window.AOActions = ctx => {
   function fillSelect(select, values, selected) {
     select.replaceChildren(...values.map(value => { const option = node('option', st('plan', value)); option.value = value; option.selected = value === selected; return option; }));
   }
+  function modelElements(prefix) {
+    return { select: $(prefix === 'plan' ? 'plan-harness' : `${prefix}-cli`), input: $(`${prefix}-model`), target: prefix === 'plan' ? $('plan-add-executor') : form(prefix).querySelector('[type=submit]') };
+  }
+  function updateModelGate(prefix) {
+    const picker = modelPickers.get(prefix); if (!picker) return;
+    const { select, target } = modelElements(prefix);
+    picker.blocked = Boolean(picker.policy?.enabled && !picker.harnesses.find(entry => entry.cli === select.value)?.restricted_supported);
+    target.disabled = picker.loading || picker.blocked || !select.value;
+    picker.note.textContent = t(picker.blocked ? 'models.blocked' : picker.policy?.enabled ? 'models.strictInfo' : 'models.nativeInfo');
+    picker.access.hidden = !picker.policy?.enabled;
+  }
+  function renderModelChoices(prefix) {
+    const picker = modelPickers.get(prefix); const { input } = modelElements(prefix);
+    const onlyFree = !picker.freeLabel.hidden && picker.free.checked;
+    const rows = picker.models.filter(model => !onlyFree || model.free);
+    const empty = node('option', t('models.choose')); empty.value = '';
+    picker.choice.replaceChildren(empty, ...rows.map(model => { const option = node('option', [model.name, model.free && !/\bfree\b/i.test(model.name) ? 'Free' : '', model.name !== model.id ? model.id : ''].filter(Boolean).join(' · ')); option.value = model.id; return option; }));
+    picker.choice.value = rows.some(model => model.id === input.value) ? input.value : '';
+    picker.list.replaceChildren(...rows.map(model => { const option = node('option', model.name); option.value = model.id; return option; }));
+  }
+  async function discoverModels(prefix, refresh = false) {
+    const picker = modelPickers.get(prefix); const { select, input } = modelElements(prefix);
+    const cli = select.value; const ticket = ++picker.ticket; picker.loading = true; updateModelGate(prefix);
+    picker.status.textContent = t('models.loading'); picker.refresh.disabled = true;
+    try {
+      const data = await api(`/api/executors/${cli}/models${refresh ? '/refresh' : ''}`);
+      if (modelPickers.get(prefix) !== picker || ticket !== picker.ticket || select.value !== cli) return;
+      picker.models = data.models || []; picker.freeLabel.hidden = cli !== 'opencode';
+      if (cli === 'opencode') picker.free.checked = !input.value || picker.models.some(model => model.id === input.value && model.free);
+      renderModelChoices(prefix); picker.status.textContent = data.warning || t('models.loaded', { n: picker.models.length });
+    } catch (error) {
+      if (modelPickers.get(prefix) !== picker || ticket !== picker.ticket) return;
+      picker.models = (picker.harnesses.find(entry => entry.cli === cli)?.configured_models || []).map(id => ({ id, name: id, free: id.endsWith('-free') }));
+      picker.freeLabel.hidden = cli !== 'opencode'; renderModelChoices(prefix); picker.status.textContent = t('models.fallback');
+    } finally {
+      if (modelPickers.get(prefix) === picker && ticket === picker.ticket) { picker.loading = false; picker.refresh.disabled = false; updateModelGate(prefix); }
+    }
+  }
+  async function setupHarnessModels(prefix, harnesses, policy, selected = '') {
+    const { select, input } = modelElements(prefix);
+    const installed = harnesses.filter(entry => entry.available);
+    select.replaceChildren(...installed.map(entry => { const option = node('option', (entry.display_name || entry.cli) + (policy?.enabled && !entry.restricted_supported ? ` · ${t('models.nativeOnly')}` : '')); option.value = entry.cli; return option; }));
+    const [cli, ...model] = selected.split('=');
+    if (installed.some(entry => entry.cli === cli)) select.value = cli;
+    else if (policy?.enabled) select.value = installed.find(entry => entry.restricted_supported)?.cli || installed[0]?.cli || '';
+    input.value = select.value === cli ? model.join('=') : '';
+    let container = $(`${prefix}-model-picker`);
+    if (!container) { container = node('div', null, 'model-picker'); container.id = `${prefix}-model-picker`; if (prefix === 'plan') input.closest('.add-executor').after(container); else input.after(container); }
+    const label = node('label', t('models.available')); label.htmlFor = `${prefix}-model-choice`;
+    const choice = node('select'); choice.id = label.htmlFor;
+    const freeLabel = node('label', null, 'choice'); const free = node('input'); free.type = 'checkbox'; free.checked = true; freeLabel.append(free, node('span', t('models.onlyFree'))); freeLabel.hidden = select.value !== 'opencode';
+    const refresh = node('button', t('models.refresh')); refresh.type = 'button';
+    const status = node('small', '', 'muted'); status.setAttribute('role', 'status');
+    const note = node('p', '', 'muted'); const access = node('button', t('models.access')); access.type = 'button';
+    let list = $(`${prefix}-models`); if (!list) { list = node('datalist'); list.id = `${prefix}-models`; container.after(list); }
+    input.setAttribute('list', list.id);
+    container.replaceChildren(label, choice, freeLabel, refresh, status, note, access);
+    const picker = { project: state.project, harnesses: installed, policy, models: [], ticket: 0, choice, freeLabel, free, refresh, status, note, access, list, loading: false };
+    modelPickers.set(prefix, picker);
+    choice.onchange = () => { if (choice.value) input.value = choice.value; };
+    free.onchange = () => { if (free.checked && !picker.models.some(model => model.id === input.value && model.free)) input.value = ''; renderModelChoices(prefix); };
+    refresh.onclick = () => discoverModels(prefix, true);
+    access.onclick = () => { managedProject = picker.project; $('project-access-settings').click(); };
+    select.onchange = () => { input.value = ''; discoverModels(prefix); };
+    if (!installed.length) { updateModelGate(prefix); showError(form(prefix), problem('flow.noHarness')); return; }
+    await discoverModels(prefix);
+  }
+  function selectedModel(prefix) {
+    const picker = modelPickers.get(prefix); const { select, input } = modelElements(prefix); const model = input.value.trim();
+    if (picker?.blocked) throw problem('models.blocked');
+    if (!model && select.value !== 'deepseek-harness') throw problem('flow.noModel');
+    if (picker && select.value === 'opencode' && picker.free.checked && !picker.models.some(entry => entry.id === model && entry.free)) throw problem('models.needFree');
+    return model;
+  }
+  dialog('access').addEventListener('close', async () => {
+    const prefixes = [...modelPickers.keys()].filter(prefix => dialog(prefix)?.open && modelPickers.get(prefix).project === accessProject);
+    if (!prefixes.length) return;
+    try {
+      const data = await api(`/api/projects/${accessProject}/access`);
+      for (const prefix of prefixes) {
+        const picker = modelPickers.get(prefix); picker.policy = data.policy;
+        if (prefix !== 'plan') fillAccessProfile(prefix, data.policy, $(`${prefix}-access-profile`).value);
+        updateModelGate(prefix);
+      }
+    } catch (error) { for (const prefix of prefixes) showError(form(prefix), error); }
+  });
   async function openPlan() {
     flowProject = state.project;
     open('plan');
@@ -477,11 +579,12 @@ window.AOActions = ctx => {
     fillSelect(element.elements.risk, data.options.risks, 'medium');
     fillSelect(element.elements.task_type, data.options.task_types, 'general');
     fillSelect(element.elements.topology, data.options.topologies, 'auto');
-    const harness = $('plan-harness');
-    harness.replaceChildren(...data.harnesses.filter(entry => entry.available).map(entry => { const option = node('option', entry.display_name || entry.cli); option.value = entry.cli; return option; }));
+    try { const access = await api(`/api/projects/${flowProject}/access`); await setupHarnessModels('plan', data.harnesses, access.policy); }
+    catch (error) { showError(element, error); }
   }
   $('plan-add-executor').addEventListener('click', () => {
-    const cli = $('plan-harness').value; const model = $('plan-model').value.trim();
+    const cli = $('plan-harness').value; let model;
+    try { model = selectedModel('plan'); } catch (error) { showError(form('plan'), error); return; }
     if (!cli) return;
     const area = $('plan-executors'); area.value = `${area.value.trim()}${area.value.trim() ? '\n' : ''}${model ? `${cli}=${model}` : cli}`;
     $('plan-model').value = '';
@@ -510,9 +613,15 @@ window.AOActions = ctx => {
     } catch (error) { showError(element, error); }
   }
   async function openLaunch(planId, itemId) {
+    const plan = await api(projectPath(`/plans/${planId}`));
+    const item = plan.items.find(entry => entry.id === itemId);
+    if (item?.editable && !item.contract_ready) { await openContract(plan, item, true); return; }
     open('launch');
-    const element = form('launch');
-    try { await prepareLaunch(element, planId, itemId, null); } catch (error) { showError(element, error); }
+    const element = form('launch'); element.querySelector('[type=submit]').disabled = true;
+    try {
+      const template = !item?.contract_ready && item?.job_ids?.length ? await api(projectPath(`/jobs/${item.job_ids.at(-1)}/launch-template`)) : null;
+      await prepareLaunch(element, planId, itemId, template); element.querySelector('[type=submit]').disabled = false;
+    } catch (error) { showError(element, error); }
   }
   async function prepareLaunch(element, planId, itemId, template) {
     const plan = await api(projectPath(`/plans/${planId}`));
@@ -575,30 +684,101 @@ window.AOActions = ctx => {
     if (!data) return;
     const access = await api(`/api/projects/${flowProject}/access`);
     fillAccessProfile('flow', access.policy);
-    const strict = ctx.selectedProject()?.access_restricted;
-    const installed = data.harnesses.filter(entry => entry.available && (!strict || ['claude-code', 'claude'].includes(entry.cli)));
-    const select = $('flow-cli');
-    select.replaceChildren(...installed.map(entry => { const option = node('option', entry.display_name || entry.cli); option.value = entry.cli; return option; }));
-    const updateModels = () => {
-      const models = installed.find(entry => entry.cli === select.value)?.configured_models || [];
-      $('flow-model').value = '';
-      $('flow-models').replaceChildren(...models.filter(value => typeof value === 'string').map(value => { const option = node('option'); option.value = value; return option; }));
-    };
-    select.onchange = updateModels; updateModels();
+    await setupHarnessModels('flow', data.harnesses, access.policy);
     fillSelect(element.elements.strategy, data.options.strategies, 'cost-first');
     fillSelect(element.elements.risk, data.options.risks, 'medium');
-    if (!installed.length) { element.querySelector('[type=submit]').disabled = true; showError(element, problem('flow.noHarness')); }
   });
   wire('flow', async element => {
     const value = name => element.elements[name].value.trim();
     for (const name of ['title', 'goal']) if (!value(name)) throw problem('err.required', { field: fieldLabel(name) });
     if (!value('cli')) throw problem('flow.noHarness');
-    if (!value('model') && value('cli') !== 'deepseek-harness') throw problem('flow.noModel');
+    const model = selectedModel('flow');
     if (!element.elements.confirm.checked) throw problem('flow.needConfirm');
     const result = await api(`/api/projects/${flowProject}/flows`, { title: value('title'), goal: value('goal'),
-      coordinator: value('cli') + (value('model') ? '=' + value('model') : ''), ...(value('access_profile') ? { access_profile: value('access_profile') } : {}), tasks: lines(value('tasks')),
+      coordinator: value('cli') + (model ? '=' + model : ''), ...(value('access_profile') ? { access_profile: value('access_profile') } : {}), tasks: lines(value('tasks')),
       executors: lines(value('executors')), expensive_executors: lines(value('expensive_executors')), strategy: value('strategy'), risk: value('risk'), confirm: true, supervise: element.elements.supervise.checked, auto_repair: element.elements.supervise.checked && element.elements.auto_repair.checked, allow_dirty: element.elements.allow_dirty.checked });
     state.pendingJob = result.job_id;
+  });
+  async function openCoordinator(plan) {
+    coordinating = { project: state.project, plan: plan.plan_id, revision: plan.edit_revision };
+    open('coordinator'); const element = form('coordinator'); element.querySelector('[type=submit]').disabled = true;
+    try {
+      const data = await loadCatalog(element); if (!data) return;
+      const access = await api(`/api/projects/${coordinating.project}/access`); fillAccessProfile('coordinator', access.policy);
+      await setupHarnessModels('coordinator', data.harnesses, access.policy, plan.coordinator?.executor || '');
+      if (plan.coordinator?.access_profile) $('coordinator-access-profile').value = plan.coordinator.access_profile;
+    } catch (error) { showError(element, error); }
+  }
+  wire('coordinator', async element => {
+    const cli = element.elements.cli.value; const model = selectedModel('coordinator');
+    if (!element.elements.confirm.checked) throw problem('flow.needConfirm');
+    const plan = await api(`/api/projects/${coordinating.project}/plans/${coordinating.plan}/coordinator`, { revision: coordinating.revision, coordinator: cli + (model ? '=' + model : ''), access_profile: element.elements.access_profile.value || null, confirm: true });
+    if (contracting?.plan.plan_id === plan.plan_id && dialog('contract').open) { contracting.plan = plan; contracting.loaded = null; $('contract-proposal').hidden = true; form('contract').querySelector('[type=submit]').disabled = true; renderContractCoordinator(); await pollContract(); }
+    state.pendingPlan = plan.plan_id;
+  });
+  function renderContractCoordinator() {
+    if (!contracting) return;
+    const plan = contracting.plan;
+    $('contract-coordinator').textContent = t('coordinator.identity', { executor: plan.coordinator?.executor || t('coordinator.none') });
+    $('contract-pick-coordinator').textContent = t(plan.coordinator?.executor ? 'coordinator.change' : 'coordinator.choose');
+    $('contract-pick-coordinator').disabled = !plan.can_edit;
+    $('contract-start').disabled = !plan.coordinator?.executor || !plan.can_edit;
+    if (!plan.coordinator?.executor) $('contract-status').textContent = t('contract.chooseFirst');
+    else if (!plan.can_edit) $('contract-status').textContent = t('planEdit.active');
+    else if ([t('contract.chooseFirst'), t('planEdit.active')].includes($('contract-status').textContent)) $('contract-status').textContent = '';
+  }
+  async function openContract(plan, item, launchAfter = false) {
+    open('contract');
+    contracting = { project: state.project, plan, item, launchAfter, loaded: null };
+    $('contract-objective').value = [item.title, plan.goal.objective && plan.goal.objective !== item.title ? plan.goal.objective : ''].filter(Boolean).join('\n\n').slice(0, 5000);
+    $('contract-status').textContent = ''; $('contract-proposal').hidden = true; form('contract').querySelector('[type=submit]').disabled = true;
+    renderContractCoordinator(); await pollContract();
+  }
+  async function pollContract() {
+    clearTimeout(contractTimer);
+    if (!contracting || !dialog('contract').open) return;
+    const context = contracting;
+    try {
+      const base = `/api/projects/${context.project}/plans/${context.plan.plan_id}/items/${context.item.id}/contract`;
+      const draft = await api(base);
+      if (context !== contracting || !dialog('contract').open) return;
+      if (draft.state === 'running') {
+        $('contract-status').textContent = t('contract.waiting'); $('contract-start').disabled = true; $('contract-pick-coordinator').disabled = true;
+        contractTimer = setTimeout(pollContract, 1500); return;
+      }
+      if (draft.state === 'ready') {
+        $('contract-status').textContent = t('contract.ready'); $('contract-proposal').hidden = false;
+        if (context.loaded !== draft.job_id) {
+          $('contract-task').value = draft.task;
+          const values = context.plan.executor_policy.allowed.map(entry => entry.display);
+          $('contract-executor').replaceChildren(...values.map(value => { const option = node('option', value); option.value = value; return option; }));
+          $('contract-executor').value = draft.assigned_executor; $('contract-executor').disabled = Boolean(context.item.assigned_executor);
+          form('contract').elements.confirm.checked = false; context.loaded = draft.job_id;
+        }
+        form('contract').querySelector('[type=submit]').disabled = false;
+      } else if (draft.error) { $('contract-status').textContent = draft.error; }
+      const plan = await api(`/api/projects/${context.project}/plans/${context.plan.plan_id}`);
+      if (context === contracting) { context.plan = plan; renderContractCoordinator(); }
+    } catch (error) { showError(form('contract'), error); }
+  }
+  $('contract-pick-coordinator').addEventListener('click', () => contracting && openCoordinator(contracting.plan));
+  $('contract-start').addEventListener('click', async () => {
+    if (!contracting) return;
+    $('contract-start').disabled = true; showError(form('contract'), null);
+    try {
+      const objective = $('contract-objective').value.trim(); if (!objective) throw problem('err.required', { field: t('contract.objective') });
+      const context = contracting;
+      await api(`/api/projects/${context.project}/plans/${context.plan.plan_id}/items/${context.item.id}/contract`, { confirm: true, objective });
+      context.loaded = null; $('contract-proposal').hidden = true; form('contract').querySelector('[type=submit]').disabled = true; await pollContract();
+    } catch (error) { showError(form('contract'), error); renderContractCoordinator(); }
+  });
+  dialog('contract').addEventListener('close', () => { clearTimeout(contractTimer); });
+  wire('contract', async element => {
+    if (!contracting || !element.elements.confirm.checked) throw problem('flow.needConfirm');
+    const context = contracting;
+    await api(`/api/projects/${context.project}/plans/${context.plan.plan_id}/items/${context.item.id}/contract/accept`, { confirm: true, job_id: context.loaded, task: element.elements.task.value, assigned_executor: element.elements.assigned_executor.value });
+    state.pendingPlan = context.plan.plan_id;
+    if (context.launchAfter) { dialog('contract').close(); await openLaunch(context.plan.plan_id, context.item.id); }
   });
   async function openPlanEdit(planId) {
     editing = null; open('plan-edit');
@@ -661,27 +841,14 @@ window.AOActions = ctx => {
       if (!data) return;
       const access = await api(`/api/projects/${supervising.project}/access`);
       fillAccessProfile('supervision', access.policy);
-      const installed = data.harnesses.filter(entry => entry.available && (!access.policy.enabled || ['claude-code', 'claude'].includes(entry.cli)));
-      const select = $('supervision-cli');
-      select.replaceChildren(...installed.map(entry => { const option = node('option', entry.display_name || entry.cli); option.value = entry.cli; return option; }));
       const coordinator = plan.supervision?.coordinator || plan.coordinator || {};
-      const [cli, ...model] = (coordinator.executor || '').split('=');
-      if (installed.some(entry => entry.cli === cli)) select.value = cli;
-      const models = () => {
-        $('supervision-model').value = '';
-        $('supervision-models').replaceChildren(...(installed.find(entry => entry.cli === select.value)?.configured_models || []).map(value => { const option = node('option'); option.value = value; return option; }));
-      };
-      select.onchange = models; models();
-      if (select.value === cli) $('supervision-model').value = model.join('=');
+      await setupHarnessModels('supervision', data.harnesses, access.policy, coordinator.executor || '');
       if (coordinator.access_profile) $('supervision-access-profile').value = coordinator.access_profile;
-      if (!installed.length) throw problem('flow.noHarness');
-      element.querySelector('[type=submit]').disabled = false;
     } catch (error) { showError(element, error); }
   }
   wire('supervision', async element => {
     const cli = element.elements.cli.value;
-    const model = element.elements.model.value.trim();
-    if (!model && cli !== 'deepseek-harness') throw problem('flow.noModel');
+    const model = selectedModel('supervision');
     if (!element.elements.confirm.checked) throw problem('flow.needConfirm');
     await api(`/api/projects/${supervising.project}/plans/${supervising.plan}/supervision`, { enabled: true, confirm: true,
       reviewer: cli + (model ? '=' + model : ''), access_profile: element.elements.access_profile.value || null, auto_repair: element.elements.auto_repair.checked });
@@ -705,7 +872,7 @@ window.AOActions = ctx => {
         const label = node('label', t('flow.assignment')); label.htmlFor = `assignment-${index}`;
         const select = node('select'); select.id = label.htmlFor; select.name = 'assignment';
         select.replaceChildren(...proposal.pool.map(value => { const option = node('option', value); option.value = value; option.selected = value === task.executor; return option; }));
-        section.append(dl, label, select); $('proposal-tasks').append(section);
+        section.append(dl, label, select); if (task.contract) { const details = node('details'); details.append(node('summary', t('planEdit.contract')), node('pre', task.contract, 'engine-detail')); section.append(details); } $('proposal-tasks').append(section);
       });
       element.querySelector('[type=submit]').disabled = false;
     } catch (error) { showError(element, error); }

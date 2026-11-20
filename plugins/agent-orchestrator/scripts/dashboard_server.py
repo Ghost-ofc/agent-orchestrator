@@ -20,6 +20,8 @@ import native_folders
 import project_access
 import ssh_inventory
 import supervision
+import contract_planning
+import model_catalog
 from project_identity import project_root, project_id, project_identity
 from agent_transcript import read_transcript
 
@@ -134,7 +136,7 @@ class DashboardState:
         latest = events[-1] if events else {}
         files = self.changed_files(workspace, status.get("git_baseline", {}))
         state = status.get("state")
-        if state == "succeeded" and status.get("role") != "orchestrator-supervision":
+        if state == "succeeded" and status.get("role") not in {"orchestrator-supervision", "coordinator-contract"}:
             state = status.get("acceptance_state", "awaiting_review")
         questions = [
             {
@@ -256,6 +258,7 @@ class DashboardState:
                         for key in ("plan_id", "title", "counts", "complete")
                     }
                 )
+                project["plans"][-1]["coordinator"] = {"executor": (plan.get("coordinator") or {}).get("executor")}
                 project["updated_at"] = max(
                     project["updated_at"],
                     plan.get("updated_at") or plan.get("created_at") or "",
@@ -585,6 +588,21 @@ class DashboardState:
             return self.update_project(parts[2], body)
         if len(parts) < 4 or parts[:2] != ["api", "projects"]:
             raise jobs.RunnerError("Unknown action route")
+        if len(parts) == 6 and parts[3] == 'plans' and parts[5] == 'coordinator':
+            _, plan = self.verified_plan(parts[2], parts[4])
+            panel_actions.only_fields(body, ('revision', 'coordinator', 'confirm'), ('access_profile',))
+            if body.get('confirm') is not True:
+                raise panel_actions.invalid('confirm')
+            changes = contract_planning.edit_body(plan)
+            changes['revision'] = body['revision']
+            changes['coordinator'] = {'executor': body['coordinator'], 'access_profile': body.get('access_profile')}
+            return panel_actions.plan_view(panel_actions.edit_plan(parts[4], changes))
+        if len(parts) == 9 and parts[3] == 'plans' and parts[5] == 'items' and parts[7:] == ['contract', 'accept']:
+            _, plan = self.verified_plan(parts[2], parts[4])
+            item = next((row for row in plan['items'] if row['id'] == parts[6]), None)
+            if item is None:
+                raise jobs.RunnerError('Unknown item')
+            return panel_actions.plan_view(contract_planning.accept(plan, item, body))
         if len(parts) == 6 and parts[3] == 'plans' and parts[5] == 'edit':
             self.verified_plan(parts[2], parts[4])
             return panel_actions.plan_view(panel_actions.edit_plan(parts[4], body))
@@ -622,6 +640,12 @@ class DashboardState:
             return panel_actions.plan_view(panel_actions.accept_flow(path, self.project_workspace(pid), body))
         if len(parts) == 4 and parts[3] == "plans":
             return panel_actions.plan_view(panel_actions.create_plan(self.project_workspace(pid), body))
+        if len(parts) == 8 and parts[3] == 'plans' and parts[5] == 'items' and parts[7] == 'contract':
+            _, plan = self.verified_plan(pid, parts[4])
+            item = next((row for row in plan['items'] if row['id'] == parts[6]), None)
+            if item is None:
+                raise jobs.RunnerError('Unknown item')
+            return contract_planning.start(plan, item, body)
         if len(parts) == 8 and parts[3] == "plans" and parts[5] == "items" and parts[7] == "launch":
             _, plan = self.verified_plan(pid, parts[4])
             if not any(item.get("id") == parts[6] for item in plan.get("items", [])):
@@ -802,12 +826,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 settings_path = jobs.state_home() / 'notifications.json'
                 settings = jobs.read_json(settings_path) if settings_path.exists() else {}
                 data = {'mode': settings.get('mode', 'important')}
+            elif len(parts) == 8 and parts[:2] == ['api', 'projects'] and parts[3] == 'plans' and parts[5] == 'items' and parts[7] == 'contract':
+                _, plan = self.server.state.verified_plan(parts[2], parts[4])
+                item = next((row for row in plan['items'] if row['id'] == parts[6]), None)
+                if item is None:
+                    raise jobs.RunnerError('Unknown item')
+                data = contract_planning.view(plan, item) or {'state': 'empty'}
             elif self.path == "/api/overview":
                 data = self.server.state.overview()
             elif len(parts) == 4 and parts[:2] == ["api", "projects"] and parts[3] == "access":
                 data = self.server.state.access_settings(parts[2])
             elif len(parts) == 4 and parts[:2] == ["api", "projects"] and parts[3] == "settings":
                 data = self.server.state.project_settings(parts[2])
+            elif len(parts) in {4, 5} and parts[:2] == ['api', 'executors'] and parts[3] == 'models' and (len(parts) == 4 or parts[4] == 'refresh'):
+                data = model_catalog.catalog(parts[2], refresh=len(parts) == 5)
             elif self.path == "/api/executors":
                 data = panel_actions.executor_catalog()
             elif len(parts) == 6 and parts[:2] == ["api", "projects"] and parts[3] == "jobs" and parts[5] == "flow":

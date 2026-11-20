@@ -249,6 +249,35 @@
       <footer><button type="button" data-close data-i18n="dialog.cancel"></button><button type="submit" class="primary" data-i18n="flow.start"></button></footer>
     </form>
   </dialog>
+  <dialog id="dlg-coordinator" aria-labelledby="dlg-coordinator-title">
+    <form id="form-coordinator" class="dialog-form" novalidate>
+      <header><h2 id="dlg-coordinator-title" data-i18n="coordinator.title"></h2><button type="button" class="close" data-close data-i18n-aria="dialog.close">&times;</button></header>
+      <p class="muted" data-i18n="coordinator.help"></p>
+      <label for="coordinator-cli" data-i18n="flow.harness"></label><select id="coordinator-cli" name="cli"></select>
+      <label for="coordinator-model" data-i18n="plan.modelLabel"></label><input id="coordinator-model" name="model" list="coordinator-models" maxlength="128"><datalist id="coordinator-models"></datalist>
+      <div id="coordinator-access-group" hidden><label for="coordinator-access-profile" data-i18n="access.coordinatorProfile"></label><select id="coordinator-access-profile" name="access_profile"></select><small id="coordinator-access-help" class="muted"></small></div>
+      <label class="choice confirm"><input name="confirm" type="checkbox"><span data-i18n="coordinator.confirm"></span></label>
+      <div class="form-error" role="alert"></div>
+      <footer><button type="button" data-close data-i18n="dialog.cancel"></button><button type="submit" class="primary" data-i18n="projects.save"></button></footer>
+    </form>
+  </dialog>
+  <dialog id="dlg-contract" aria-labelledby="dlg-contract-title">
+    <form id="form-contract" class="dialog-form wide" novalidate>
+      <header><h2 id="dlg-contract-title" data-i18n="contract.title"></h2><button type="button" class="close" data-close data-i18n-aria="dialog.close">&times;</button></header>
+      <p class="muted" data-i18n="contract.help"></p>
+      <p id="contract-coordinator" class="access-boundary"></p><button id="contract-pick-coordinator" type="button" data-i18n="coordinator.choose"></button>
+      <label for="contract-objective" data-i18n="contract.objective"></label><textarea id="contract-objective" name="objective" rows="4" maxlength="5000"></textarea>
+      <button id="contract-start" type="button" class="primary" data-i18n="contract.generate"></button>
+      <p id="contract-status" class="muted" role="status" aria-live="polite"></p>
+      <div id="contract-proposal" hidden>
+        <label for="contract-task" data-i18n="planEdit.contract"></label><textarea id="contract-task" name="task" rows="12" maxlength="20000"></textarea>
+        <label for="contract-executor" data-i18n="planEdit.executor"></label><select id="contract-executor" name="assigned_executor"></select>
+        <label class="choice confirm"><input name="confirm" type="checkbox"><span data-i18n="contract.confirm"></span></label>
+      </div>
+      <div class="form-error" role="alert"></div>
+      <footer><button type="button" data-close data-i18n="dialog.cancel"></button><button type="submit" class="primary" data-i18n="contract.save" disabled></button></footer>
+    </form>
+  </dialog>
   <dialog id="dlg-plan-edit" aria-labelledby="dlg-plan-edit-title">
     <form id="form-plan-edit" class="dialog-form wide" novalidate>
       <header><h2 id="dlg-plan-edit-title" data-i18n="planEdit.title"></h2><button type="button" class="close" data-close data-i18n-aria="dialog.close">&times;</button></header>
