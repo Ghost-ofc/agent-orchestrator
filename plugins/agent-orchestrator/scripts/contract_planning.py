@@ -13,8 +13,67 @@ def request_path(plan_id, item_id):
     return jobs.plan_dir(plan_id) / 'contracts' / (item_id + '.json')
 
 
+def get_assistant_texts(job_path: Path) -> list[str]:
+    texts = []
+    log_path = job_path / 'stdout.log'
+    if not log_path.exists():
+        return texts
+
+    # 1. Parse JSON lines from stdout.log directly (works for Antigravity, Claude, OpenCode, Codex)
+    try:
+        with log_path.open('r', encoding='utf-8', errors='replace') as handle:
+            lines = handle.readlines()
+            for line in reversed(lines):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    val = json.loads(line)
+                    if isinstance(val, dict):
+                        # Antigravity result
+                        if val.get('event') == 'result' and isinstance(val.get('result'), dict):
+                            r = val['result'].get('response')
+                            if isinstance(r, str) and r.strip():
+                                texts.append(r)
+                        # Claude result
+                        elif val.get('type') == 'result' and isinstance(val.get('result'), str) and val['result'].strip():
+                            texts.append(val['result'])
+                        # OpenCode text
+                        elif val.get('type') == 'text' and isinstance(val.get('text'), str) and val['text'].strip():
+                            texts.append(val['text'])
+                except Exception:
+                    pass
+                if len(texts) >= 10:
+                    break
+    except Exception:
+        pass
+
+    # 2. Add transcript messages regardless of clipped flag
+    try:
+        transcript = read_transcript(log_path)
+        for m in transcript.get('messages', []):
+            if m.get('role') == 'assistant' and m.get('text'):
+                texts.append(m['text'])
+    except Exception:
+        pass
+
+    # 3. Add tail of log if plain text or needed
+    try:
+        with log_path.open('r', encoding='utf-8', errors='replace') as handle:
+            handle.seek(0, 2)
+            size = handle.tell()
+            handle.seek(max(0, size - 120000))
+            tail = handle.read()
+            if tail:
+                texts.append(tail)
+    except Exception:
+        pass
+
+    return texts
+
+
 def validate_contract(task):
-    if not isinstance(task, str) or not 1 <= len(task) <= 20000:
+    if not isinstance(task, str) or not 1 <= len(task) <= 50000:
         raise jobs.RunnerError('El contrato generado debe ser un texto acotado.')
     problems = jobs.validate_task_packet(task)
     if problems or re.search(r'<<\s*(?:completar|complete)\s*>>', task, re.I):
@@ -56,13 +115,8 @@ def view(plan, item, *, include_task=True):
         return base
     if status['execution_state'] != 'succeeded':
         return {**base, 'state': 'failed', 'error': 'El orquestador no pudo terminar el borrador. Revisa su conversación.'}
-    transcript = read_transcript(job_path / 'stdout.log')
-    candidates = [m['text'] for m in transcript['messages'] if m['role'] == 'assistant' and not m.get('clipped')]
-    with (job_path / 'stdout.log').open(encoding='utf-8', errors='replace') as handle:
-        raw = handle.read(20001)
-    if len(raw) <= 20000:
-        candidates.insert(0, raw)
-    for text_block in reversed(candidates):
+    candidates = get_assistant_texts(job_path)
+    for text_block in candidates:
         for value in reversed(extract_contract_payloads(text_block)):
             try:
                 task = validate_contract(value['task'])
@@ -196,16 +250,11 @@ def batch_view(plan):
         return base
     if status['execution_state'] != 'succeeded':
         return {**base, 'state': 'failed', 'error': 'El orquestador no pudo terminar la preparación de los contratos.'}
-    transcript = read_transcript(job_path / 'stdout.log')
-    candidates = [m['text'] for m in transcript['messages'] if m['role'] == 'assistant' and not m.get('clipped')]
-    with (job_path / 'stdout.log').open(encoding='utf-8', errors='replace') as handle:
-        raw = handle.read(40001)
-    if len(raw) <= 40000:
-        candidates.insert(0, raw)
+    candidates = get_assistant_texts(job_path)
     allowed = {entry['display'] for entry in plan.get('executor_policy', {}).get('allowed', [])}
     item_map = {item['id']: item for item in plan.get('items', [])}
 
-    for text_block in reversed(candidates):
+    for text_block in candidates:
         for payload in reversed(extract_batch_contract_payloads(text_block)):
             items_res = []
             valid = True

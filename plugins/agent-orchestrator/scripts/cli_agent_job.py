@@ -40,6 +40,35 @@ REQUIRED_TASK_SECTIONS = (
     "Validation",
     "Final report",
 )
+
+REQUIRED_TASK_SECTION_ALIASES: dict[str, tuple[str, ...]] = {
+    "Objective": ("objective", "objetivo"),
+    "Why": ("why", "por qué", "por que"),
+    "Scope": ("scope", "alcance"),
+    "Files to inspect": ("files to inspect", "archivos a inspeccionar", "archivos"),
+    "Implementation guidance": (
+        "implementation guidance",
+        "guía de implementación",
+        "guia de implementacion",
+        "implementación",
+        "implementacion",
+        "pasos",
+    ),
+    "Constraints": ("constraints", "restricciones"),
+    "Acceptance criteria": (
+        "acceptance criteria",
+        "criterios de aceptación",
+        "criterios de aceptacion",
+        "aceptación",
+        "aceptacion",
+    ),
+    "Validation": ("validation", "validación", "validacion"),
+    "Final report": (
+        "final report",
+        "reporte final",
+        "informe final",
+    ),
+}
 REQUIRED_PLAN_SECTIONS = (
     "Goal",
     "Decisions and assumptions",
@@ -267,6 +296,14 @@ BUILTIN_PROFILES: dict[str, dict[str, Any]] = {
         ],
         "executable_candidates": ["agy", "antigravity"],
         "prompt_transport": "jsonl-stdin",
+        "models": [
+            "claude-sonnet-4-6",
+            "claude-opus-4-6-thinking",
+            "gemini-3.8-flash-high",
+            "gemini-3.8-flash-medium",
+            "gemini-3.8-flash-low",
+            "gpt-oss-120b-medium",
+        ],
         "model_args": ["--model", "{model}"],
         "cli_agent_args": ["--agent", "{cli_agent}"],
         "reasoning_effort_args": ["--effort", "{reasoning_effort}"],
@@ -974,7 +1011,8 @@ def validate_task_packet(text: str) -> list[str]:
     headings = extract_markdown_headings(text)
     problems: list[str] = []
     for required in REQUIRED_TASK_SECTIONS:
-        matching = [entry for entry in headings if entry[0] == required.casefold()]
+        aliases = REQUIRED_TASK_SECTION_ALIASES.get(required, (required.casefold(),))
+        matching = [entry for entry in headings if entry[0] in aliases]
         if not matching:
             problems.append(f"missing section: {required}")
             continue
