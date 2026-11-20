@@ -331,7 +331,7 @@ class DashboardTests(unittest.TestCase):
         self.assertNotIn(str(self.root), json.dumps(canonical_project))
 
     def test_static_allowlist_and_security_headers(self):
-        for path in ("/", "/index.html", "/styles.css", "/i18n.js", "/favicon.svg", "/actions.js", "/app.js"):
+        for path in ("/", "/index.html", "/styles.css", "/i18n.js", "/favicon.svg", "/logo.png", "/actions.js", "/app.js"):
             status, headers, _ = self.request(path, authenticated=False)
             self.assertEqual(status, 200, path)
             self.assertEqual(headers["Cache-Control"], "no-store")
@@ -356,7 +356,7 @@ class DashboardTests(unittest.TestCase):
         script = (web / "app.js").read_text()
         styles = (web / "styles.css").read_text()
         self.assertIn(
-            '<aside class="agents-sidebar" data-i18n-aria="agents.label">', html
+            '<section class="agents-sidebar" data-i18n-aria="agents.label">', html
         )
         self.assertIn(
             '<nav id="agent-navigation" data-i18n-aria="agents.listLabel">', html

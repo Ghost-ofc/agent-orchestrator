@@ -1,575 +1,359 @@
-# Agent Orchestrator
+<p align="center">
+  <img src="plugins/agent-orchestrator/web/logo.png" alt="Logo de Agent Orchestrator" width="144">
+</p>
 
-Agent Orchestrator is a Codex plugin for separating long-lived coordination from bounded code
-execution. You choose which model plans and holds the project thread, which CLI/model executes each
-task, and which model reviews the result. It can form a small team of independent top-level workers
-across Cursor, Devin, OpenCode, Grok, Codex, Claude, and other installed harnesses.
+<h1 align="center">Agent Orchestrator</h1>
 
-It is designed for long-running implementation work where you want to choose a less expensive CLI
-or model, give it a precise task contract, see what it is doing, answer clarification questions,
-and independently review the resulting diff and tests before accepting it. Large jobs can start
-from one prompt: Codex creates a durable plan, maintains its checklist, dispatches each item, handles
-questions, applies gates, and keeps the evidence needed to resume later.
+<p align="center">Un centro de control local para coordinar agentes de programación, seguir sus tareas y revisar sus resultados.</p>
 
-Requesting Agent Orchestrator also asks Codex to create a native persistent goal when the task does
-not already have one, unless you opt out. If an aligned goal already exists it is reused; an
-unrelated active goal is never overwritten. The native goal keeps Codex pursuing the outcome while
-the durable plan holds detailed checklist, executor, question, and review state.
+<p align="center">
+  <a href="https://github.com/Ghost-ofc/agent-orchestrator/actions/workflows/ci.yml"><img src="https://github.com/Ghost-ofc/agent-orchestrator/actions/workflows/ci.yml/badge.svg" alt="Estado de las pruebas"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/licencia-MIT-blue" alt="Licencia MIT"></a>
+</p>
 
-## Why separate coordination from execution?
+Agent Orchestrator conecta varios CLI de agentes con planes persistentes y un panel web en español. Puedes elegir quién coordina, asignar un agente a cada tarea o dejar que el coordinador proponga la distribución dentro de un conjunto autorizado. El historial, las preguntas, los cambios y la revisión quedan guardados localmente.
 
-Long-running agent work mixes two different workloads:
+El panel permite crear proyectos y preparar flujos sin abrir una terminal para cada tarea. Los CLI deben estar instalados y autenticados previamente; el orquestador utiliza esas cuentas locales.
 
-- Coordination repeatedly revisits user intent, decisions, dependencies, questions, and progress.
-- Execution needs a precise local assignment, the relevant repository files, strong coding ability,
-  and a clear exit condition.
+## Contenido
 
-Sending the entire growing conversation to every executor wastes context. Agent Orchestrator keeps
-plans, job state, logs, usage, questions, and review evidence in a durable local control plane. The
-coordinator receives compact state changes; every executor gets one bounded context capsule and
-exits after reporting its work.
+- [Qué puedes hacer](#qué-puedes-hacer)
+- [Instalación](#instalación)
+- [Primer flujo desde el navegador](#primer-flujo-desde-el-navegador)
+- [Proyectos y carpetas](#proyectos-y-carpetas)
+- [Modelos y agentes compatibles](#modelos-y-agentes-compatibles)
+- [Permisos MCP y SSH](#permisos-mcp-y-ssh)
+- [Servicio automático con systemd](#servicio-automático-con-systemd)
+- [Uso desde el CLI](#uso-desde-el-cli)
+- [Privacidad y datos locales](#privacidad-y-datos-locales)
+- [Desarrollo y pruebas](#desarrollo-y-pruebas)
 
-## This is not just another subagent feature
+## Qué puedes hacer
 
-Cursor, Claude Code, Codex, Devin, and other harnesses can already create subagents inside their own
-runtime. Those native subagents are useful, but they are controlled and metered behind one parent
-harness. Agent Orchestrator owns a different layer: it creates accountable top-level workers across
-different CLIs and subscriptions, gives each an exact role and model, and keeps their questions,
-usage, changes, and review state in one local control plane.
+| Función | Comportamiento |
+| --- | --- |
+| Panel de control | Árbol de proyectos y sesiones, lienzo de nodos e inspector de agentes y planes. |
+| Flujos visuales | Selección del coordinador, objetivo, tareas y ejecutores desde el navegador. |
+| Gestión de proyectos | Crear o importar carpetas, cambiar el nombre visible, archivar, restaurar y quitar proyectos del panel. |
+| Seguimiento | Estados, fases, tiempo, preguntas, archivos cambiados, evidencias y consumo reportado por el proveedor. |
+| Acciones | Lanzar, cancelar, responder preguntas, revisar resultados y preparar reintentos. |
+| Planes persistentes | Checklist, dependencias, decisiones, contratos de tarea y estado recuperable. |
+| Recursos por proyecto | Lista explícita de servidores MCP y destinos SSH permitidos, con perfiles por agente. |
+| Inventario SSH | Descubrimiento pasivo, agrupación y búsqueda de hosts e identidades locales. |
+| Servicio de usuario | Arranque automático del panel y reinicio ante fallos mediante `systemd`. |
 
-The design is inspired by [Devin Fusion](https://cognition.com/blog/devin-fusion), which pairs a
-frontier lead with a lower-cost sidekick. Agent Orchestrator applies that separation across
-harnesses: a Codex coordinator can assign one bounded item to Cursor, another to Devin, and another
-to OpenCode or Grok. It prefers two to four useful roles over a large swarm, parallelizes only
-independent scopes, and keeps one writer per workspace.
+La coordinación conserva el objetivo y las decisiones; cada ejecutor recibe una tarea acotada. Los procesos trabajan de forma independiente del navegador. Cerrar la pestaña no cancela los trabajos.
 
-One orchestrator job means one visible agent. Native nested subagents are denied by default where a
-harness exposes a reliable control (`--no-subagents` for Grok and a bundled `subagentStart` deny
-hook for Cursor) and prohibited by the worker contract everywhere else. This prevents hidden model
-switches, surprise parallel token use, and work that cannot be attributed in the dashboard.
+## Instalación
 
-This also lets existing personal allowances become an execution portfolio. A user may coordinate
-from Codex while routing suitable tasks through an authenticated Devin, OpenCode, Cursor, Claude,
-or other CLI account. Availability, quotas, and overage billing remain provider-specific; the
-plugin does not turn a subscription into unlimited or interchangeable API credit.
+### Requisitos
 
-This makes two useful flows possible. A cost-efficient coordinator can preserve the long thread
-while the strongest model handles short implementation bursts, or a strong coordinator can do the
-hard planning and review while a cheaper model performs carefully specified edits. OpenAI describes
-[GPT-5.6 Luna](https://developers.openai.com/api/docs/models/gpt-5.6-luna) as a cost-sensitive,
-high-volume model and [GPT-6 Astra](https://developers.openai.com/api/docs/models/gpt-6-astra) as its
-most capable model for complex reasoning and coding. Stronger execution can also reduce failed
-attempts and output volume, so the useful metric is cost per accepted task—not price per token
-alone. [OpenAI model guidance](https://developers.openai.com/api/docs/guides/latest-model)
+- Python **3.11 o posterior** y Git.
+- Codex para instalar e invocar la skill del plugin.
+- Al menos un CLI de agente instalado y autenticado.
+- Un navegador para utilizar el panel local.
+- Opcional: Linux con `systemd` de usuario para el servicio automático.
+- Opcional: XDG Desktop Portal y PyGObject en el Python del sistema para el selector nativo de carpetas en Linux.
+- Opcional: OpenSSH para ejecutar comandos en destinos autorizados.
 
-The other major cost is coordinator replay. In one anonymized 24-hour project trace, a single
-long-lived coordinator accumulated 528.4 million input tokens, 519.5 million of them cached, across
-48 task turns and 29 context compactions. The executor jobs were bounded; repeatedly waking the
-near-full coordinator was the dominant amplification. Agent Orchestrator therefore resumes from a
-small durable `plan-checkpoint`, waits once after dispatch, and relies on phase changes, questions,
-completion events, the dashboard, and notifications instead of tight polling.
+El servidor web utiliza la biblioteca estándar de Python. La interfaz usa HTML, CSS y JavaScript nativo, sin compilación de frontend, CDN ni dependencias de React.
 
-## What it provides
-
-- Independent selection of CLI, model, and a CLI's internal agent/persona when supported.
-- Built-in profiles for Google Antigravity CLI, DeepSeek Harness, Kimi Code, Codex CLI, Claude
-  Code, Cursor CLI, Devin CLI, Grok CLI, Gemini CLI, and OpenCode.
-- Durable `auto`, `single`, and `cross-harness` execution topologies with a bounded parallel-team
-  size and Agent Orchestrator ownership of all spawning.
-- Detached jobs with durable status, stdout/stderr logs, heartbeats, progress events, and git diff
-  summaries.
-- A job-local question channel that lets a worker pause for a concrete answer without restarting.
-- A local web dashboard spanning every project, with worker questions and durable orchestrator
-  feedback answered directly in the inspector.
-- Desktop notifications for questions, completion, failure, timeout, and scope violations.
-- One-writer-per-workspace protection, dependency ordering, path allow/deny rules, and changed-file
-  limits.
-- A persistent workspace preference: isolated worktrees by default, or the existing project
-  checkout when the user opts out of worktrees for space or workflow reasons.
-- Durable plans with decision records, checklist-bound jobs, resumable progress, and completion
-  evidence.
-- Automatic intent routing with a cost-first default, quality-first Sol/Opus execution, explicit
-  maximum-quality Astra authorization, risk-based reasoning effort, and exact durable allowlists.
-- Evidence-aware candidate ranking by task type, using versioned public benchmark/model sources as
-  priors and reviewed local acceptance, repair, execution-failure, and scope-failure history as the
-  stronger signal once enough samples exist.
-- Compact goal checkpoints and 24-hour outcome/usage metrics for evidence-based routing without
-  replaying the full coordinator transcript.
-- Fail-closed executor pools: every launch must match the plan's resolved or user-selected exact
-  CLI/model pairing, and Astra never appears from a failure fallback.
-- Controlled escalation that exhausts the approved pool, asks in chat and the dashboard, and can
-  use only a pre-approved Terra fallback after an unanswered grace period.
-- A concise installed-harness chooser followed by harness-specific model and internal-agent
-  discovery.
-- A required detailed task contract and a Codex review/repair gate.
-- JSON adapter configuration for additional headless coding CLIs without shell interpolation.
-
-Agent Orchestrator does not make an external CLI safe or inexpensive by itself. Permissions, token
-usage, and cost still depend on the selected CLI, model, account, and repository. Treat every worker
-as untrusted until Codex has inspected its diff and rerun the relevant checks.
-
-## Install in Codex
-
-Add this repository as a plugin marketplace, then install the plugin:
+### Como plugin de Codex
 
 ```bash
-codex plugin marketplace add Augani/agent-orchestrator
+codex plugin marketplace add Ghost-ofc/agent-orchestrator
 codex plugin add agent-orchestrator@agent-orchestrator
 ```
 
-Restart Codex if the skill is not immediately available. Each external CLI must be installed and
-authenticated separately; Agent Orchestrator never stores provider credentials.
+Reinicia Codex si la skill no aparece inmediatamente. Cada proveedor conserva su propio inicio de sesión, disponibilidad de modelos, cuotas y facturación.
 
-## Supported profiles
+### Desde el repositorio
 
-| Profile | Model choice | Internal agent | Budget control | Notes |
-| --- | --- | --- | --- | --- |
-| `antigravity` | Yes | Yes | Reasoning effort | Uses `agy` sandboxed headless mode, pinned models, JSONL stdin, and streaming usage. |
-| `codex-cli` | Yes | No | Provider config | Uses `codex exec`, stdin, `workspace-write`, and ephemeral sessions. |
-| `claude-code` | Yes | Yes | `--max-budget-usd` | Uses non-interactive `acceptEdits`; `claude` is a compatibility alias. |
-| `kimi-code` | Yes | Yes | Provider config | Accepts either `kimi` or `kimi-cli`; uses streaming JSON print mode. |
-| `deepseek-harness` | Profile config | No | Profile config | Developer preview; its documented headless interface exposes the prompt as a process argument. |
-| `devin` | Yes | No | Provider config | Uses a prompt file and accepted-edit sandbox profile. |
-| `grok` | Yes | Yes | Max turns | Uses a prompt file and disables subagents by default. |
-| `gemini` | Yes | No | Provider config | Uses stdin and auto-edit mode. |
-| `opencode` | Yes (`provider/model`) | Yes | Reasoning variant | Uses `opencode run` with the prompt on stdin and an isolated config, so any `opencode/*-free` model works. |
-| `cursor` | Yes | Denied | Provider config | Uses sandboxed headless streaming, live model discovery, and a bundled hook that blocks nested subagents. |
+```bash
+git clone https://github.com/Ghost-ofc/agent-orchestrator.git
+cd agent-orchestrator
 
-Run the catalog before choosing:
+python3 plugins/agent-orchestrator/scripts/cli_agent_job.py choices --json
+python3 plugins/agent-orchestrator/scripts/cli_agent_job.py ensure-dashboard
+```
+
+`ensure-dashboard` reutiliza el panel registrado si está disponible; de lo contrario, lo inicia y abre su URL autenticada. La skill también lo invoca al comenzar una sesión de orquestación.
+
+Para ejecutar el servidor en primer plano:
+
+```bash
+python3 plugins/agent-orchestrator/scripts/cli_agent_job.py dashboard-web --no-open --port 44509
+```
+
+`Ctrl+C` detiene ese servidor. `--port 0` solicita un puerto libre. El [servicio systemd](#servicio-automático-con-systemd) permite mantenerlo disponible automáticamente.
+
+## Primer flujo desde el navegador
+
+1. Crea un proyecto o importa una carpeta existente.
+2. Selecciona **Nuevo flujo** y elige un CLI coordinador instalado y un modelo explícito.
+3. Describe el objetivo. Puedes indicar tareas y un conjunto autorizado de ejecutores con el formato `CLI=MODELO`, uno por línea.
+4. Para fijar un agente en una tarea, utiliza un prefijo como `claude-code=sonnet | Implementar el backend`. Las tareas sin prefijo quedan a criterio del coordinador dentro del conjunto autorizado.
+5. El coordinador se ejecuta como un trabajo de planificación. Al terminar, abre **Revisar propuesta** y comprueba el alcance, los criterios de aceptación, la validación y las asignaciones.
+6. Elige **Crear plan con estas tareas**. Desde cada tarea puedes revisar su contrato preparado y confirmar su lanzamiento.
+7. Responde las preguntas del agente y registra una revisión independiente antes de aceptar el resultado.
+
+Si no indicas ejecutores, el motor resuelve y guarda un conjunto de modelos instalados según la estrategia y el riesgo. El coordinador puede distribuir tareas dentro de ese conjunto; no puede ampliarlo por su cuenta. Las asignaciones a modelos costosos protegidos requieren autorización explícita.
+
+**La ejecución es supervisada:** crear un flujo prepara una propuesta; aceptar el plan no lanza todas sus tareas ni acepta automáticamente sus resultados. Las propuestas inválidas y las asignaciones fuera del conjunto autorizado se rechazan.
+
+El inspector permite consultar conversación, archivos, pruebas y consumo disponible. Un proceso terminado puede seguir **pendiente de revisión**. Cuando un proveedor no informa una métrica, se muestra como no disponible.
+
+## Proyectos y carpetas
+
+**Nuevo proyecto** permite crear una carpeta local, inicializar Git opcionalmente o registrar una carpeta existente. Los proyectos vacíos aparecen inmediatamente.
+
+En Linux, **Elegir carpeta…** abre el selector del sistema mediante XDG Desktop Portal. Para crear una carpeta, **Elegir ubicación…** selecciona el directorio padre y otro campo define el nombre. Cancelar conserva la ruta escrita. Si la integración del escritorio no está disponible, puedes introducir la ruta manualmente.
+
+Desde **Gestionar proyecto** puedes:
+
+- Cambiar su nombre visible.
+- Archivar y restaurar; **Mostrar archivados** permite recuperar la vista de proyectos archivados.
+- Quitar el proyecto del panel, conservando sus archivos y su historial persistente.
+
+Los proyectos con agentes activos no pueden archivarse ni quitarse. Volver a importar una carpeta recupera su historial y sus restricciones guardadas. El repositorio principal y sus worktrees comparten una identidad de proyecto.
+
+## Modelos y agentes compatibles
+
+| Perfil | Selección de modelo | Observaciones |
+| --- | --- | --- |
+| `codex-cli` | Explícita | `codex exec`, entrada por stdin y sandbox `workspace-write`. |
+| `claude-code` | Explícita | Modo no interactivo; agente interno y presupuesto cuando están disponibles. `claude` es un alias de compatibilidad. |
+| `antigravity` | Explícita | Protocolo headless de `agy`, streaming JSONL, agente interno y esfuerzo de razonamiento. |
+| `kimi-code` | Explícita | Admite `kimi` y `kimi-cli`, con streaming y agente interno. |
+| `deepseek-harness` | Configuración del perfil | Adaptador de vista previa; su interfaz puede exponer el prompt como argumento de proceso. |
+| `devin` | Explícita | Tarea desde archivo y perfil de edición del proveedor. |
+| `grok` | Explícita | Tarea desde archivo; subagentes desactivados por defecto. |
+| `gemini` | Explícita | Entrada por stdin y modo de edición automática. |
+| `opencode` | `proveedor/modelo` | Entrada por stdin y configuración aislada; incluye modelos gratuitos disponibles en el proveedor. |
+| `cursor` | Explícita | Streaming, sandbox y hook que bloquea subagentes anidados. Puede requerir confianza interactiva inicial del proyecto. |
+
+Consulta la instalación real antes de elegir:
 
 ```bash
 python3 plugins/agent-orchestrator/scripts/cli_agent_job.py choices --json
-python3 plugins/agent-orchestrator/scripts/cli_agent_job.py profiles
 python3 plugins/agent-orchestrator/scripts/cli_agent_job.py doctor --cli all
 python3 plugins/agent-orchestrator/scripts/cli_agent_job.py catalog --cli codex-cli
 python3 plugins/agent-orchestrator/scripts/cli_agent_job.py catalog --cli claude-code
-python3 plugins/agent-orchestrator/scripts/cli_agent_job.py catalog --cli kimi-code
-python3 plugins/agent-orchestrator/scripts/cli_agent_job.py catalog --cli antigravity
-python3 plugins/agent-orchestrator/scripts/cli_agent_job.py catalog --cli cursor
 ```
 
-`choices` shows only installed harnesses by default. Once the user chooses one, `catalog` shows its
-live model list where the CLI exposes one, configured aliases otherwise, available internal agents,
-and supported controls. Codex model discovery is compacted to model IDs, descriptions, defaults,
-and reasoning-effort choices instead of loading the CLI's full catalog payload into coordinator
-context. Claude Code currently exposes the configured aliases `sonnet`, `opus`, and `fable`.
-Whenever a harness supports model selection, Agent Orchestrator requires an explicit `--model` so
-an unknown configured default cannot silently become an expensive executor.
+`doctor --cli all` devuelve un estado de error si falta algún CLI del catálogo; no necesitas instalarlos todos. Los modelos y controles dependen de la versión del CLI y de tu cuenta.
 
-`doctor --cli all` exits non-zero when any built-in CLI is missing; that is expected when you only
-install the agents you use.
+### Estrategia y revisión
 
-Antigravity uses its official `agy` headless stream protocol, pins `--model`, accepts an optional
-`--agent` and `--effort`, and enables `--sandbox`. The runner sends the complete private task capsule
-as one JSON user event on stdin, so it is not exposed in the process list. It deliberately omits
-`--print`, which takes the prompt as its value and would swallow the next flag. It never uses
-`--dangerously-skip-permissions`; configure narrow Antigravity permission rules for the exact write
-paths and validation commands required by the task.
+- **`cost-first`**: prioriza el coste esperado por tarea aceptada dentro del conjunto autorizado.
+- **`quality-first`**: prioriza calidad; sus autorizaciones no equivalen a habilitar cualquier modelo de máximo coste.
+- **`maximum-quality`**: requiere una elección explícita de máxima calidad y coste.
+- **Personalizada**: fija exactamente los pares CLI/modelo aprobados.
 
-OpenCode runs as `opencode run --format json --dir <workspace> --model provider/model` and receives the
-task on stdin, so it is not exposed in the process list. Each worker gets a private
-`XDG_CONFIG_HOME` inside its job directory, so it does not inherit your interactive MCP servers or
-plugins: their tool count can exceed the 128 tools a free model's upstream accepts, and workers should
-not receive credentials for unrelated systems. Your global commands (which can inject shell output outside
-the tool permission flow), agents, and MCP servers are therefore not visible to workers, while the
-workspace's own `opencode.json` and `.opencode/` still apply. Provider credentials live in
-`XDG_DATA_HOME` and still apply. List models with `catalog --cli opencode`; free ones end in `-free` (for example
-`opencode/big-pickle`). This was verified on OpenCode 1.18.x. The OpenCode docs describe a newer
-release with a shared background service; if your version reuses a shared server, a worker would run
-with that server's configuration, so also check whether it offers `--standalone`.
+El motor guarda el conjunto autorizado y comprueba cada lanzamiento. La topología puede ser `auto`, `single` o `cross-harness`; el trabajo paralelo respeta dependencias, límites de equipo y un escritor por workspace. Los subagentes anidados se bloquean cuando el CLI ofrece un control fiable y se prohíben en el contrato del ejecutor.
 
-Cursor uses `cursor-agent` in sandboxed headless streaming mode and loads the bundled guard that
-denies nested subagents. Cursor may require a one-time interactive trust decision for each project
-workspace. Open Cursor Agent in that project and make the decision yourself; Agent Orchestrator
-never passes `--trust`, `--force`, `--yolo`, or `--approve-mcps`, and never redirects a worker into
-the private orchestrator state directory merely to avoid the prompt.
+En flujos iniciados desde Codex, el modelo actual de la conversación actúa como coordinador. `--coordinator-model` registra metadatos; no cambia el modelo de esa conversación. El panel puede lanzar otro CLI/modelo como coordinador de la propuesta.
 
-## Choose a model-role flow
+La selección automática utiliza el catálogo versionado y el historial local de resultados revisados. No presenta sus heurísticas como puntuaciones reales de benchmarks. Consulta las reglas completas en [enrutamiento y planes](plugins/agent-orchestrator/skills/orchestrate-cli-agents/references/routing-and-plans.md).
 
-Run `routes` to inspect the built-in policies:
+## Permisos MCP y SSH
 
-| Route | Recommended Codex task model | Executor | Best when |
-| --- | --- | --- | --- |
-| `cost-first` (default) | Current task model | Installed Terra, then Luna, with risk-based effort | You want the lowest expected cost per accepted change without weakening quality gates. |
-| `quality-first` | Current task model | Installed Sol, Opus, then Terra, with risk-based effort | You say “quality over cost”; this authorizes Sol/Opus but not Astra. |
-| `maximum-quality` | Current task model | Installed Astra, Sol, and Opus | You explicitly authorize maximum/frontier execution quality and cost. |
-| `economy-first` | GPT-6 Astra | Recommends Codex CLI + GPT-5.6 Luna, but never selects it | Architecture and review are hard, but implementation can use an approved lower-cost pool. |
-| Custom | Your choice | Any supported CLI/model/agent/effort | You want another provider or complete control over the pairing. |
+Abre **Gestionar proyecto → Accesos MCP / SSH** para configurar recursos permitidos.
 
-The current Codex task model is always the orchestrator. The runner never changes it; coordinator
-metadata defaults to `current-codex-task`, and an explicit `--coordinator-model` only changes that
-metadata. `create-plan` resolves an automatic installed-model allowlist from natural-language intent
-and risk, while every individual launch still names and verifies the exact executor:
+> El modo de acceso restringido está implementado para **Claude Code en Linux**, con soporte de `--restricted`, `--strict-mcp-config`, `--tools` y configuración de sesión. El motor verifica estas capacidades y rechaza versiones, políticas o adaptadores incompatibles. No promete las mismas restricciones para otros CLI.
+
+### Servidores MCP
+
+El catálogo muestra los nombres de servidores encontrados en la configuración de Claude. Los seleccionados se copian a configuraciones privadas de cada trabajo. La configuración MCP estricta impide heredar servidores externos no seleccionados; una selección vacía no carga MCP externos.
+
+El catálogo no envía al navegador variables de entorno ni cabeceras de autorización de esos servidores. Autorizar un MCP implica confiar en sus herramientas y en sus permisos propios.
+
+### Destinos SSH
+
+Cada destino autorizado incluye alias, host/IP, usuario, puerto y ruta de una identidad existente. El agente recibe `ssh_exec` sobre esos alias, sin argumentos SSH arbitrarios.
+
+El broker utiliza OpenSSH con una configuración independiente: host keys existentes verificadas estrictamente, autenticación no interactiva, identidad seleccionada y sin heredar proxies, comandos de configuración ni reenvíos de agente, X11 o puertos. No se copian los contenidos de las claves al panel. Los comandos tienen límites de tiempo y salida; la auditoría registra las conexiones sin copiar el texto del comando.
+
+Una lista vacía no expone destinos SSH.
+
+### Inventario y grupos
+
+El inventario lee de forma pasiva `~/.ssh/config` y los `Include` compatibles. Muestra alias, usuarios, puertos y rutas de identidad; comprueba la existencia de archivos mediante metadatos. No abre claves privadas, ejecuta `Match exec` ni realiza conexiones SSH.
+
+Los `Include` se limitan a archivos llamados `config` o terminados en `.conf`. Las configuraciones dinámicas, proxies y opciones no soportadas requieren revisión manual. Los candidatos encontrados por nombre, extensión o archivo `.pub` asociado no se consideran claves verificadas criptográficamente.
+
+Puedes buscar por host, grupo, usuario o identidad. **Organizar este host** permite asignar grupo y entorno: desarrollo, pruebas, producción o sin clasificar. También se señalan cuentas `root`, identidades compartidas y candidatos sin host asociado.
+
+**Agrupar, importar o actualizar el inventario no concede acceso.** Las etiquetas son globales para el inventario y no modifican `~/.ssh/config` ni mueven archivos.
+
+### Perfiles por agente
+
+Activa **Asignar recursos mediante perfiles de agente** y crea subconjuntos como `backend` o `revision`. Cada perfil solo puede utilizar MCP y destinos SSH autorizados previamente para el proyecto.
+
+Elige el perfil por separado para el coordinador y cada ejecutor. Desde el CLI utiliza `--access-profile backend`. El inspector muestra el perfil aplicado y los recursos efectivos.
+
+Con este control activo, un agente sin perfil recibe **cero MCP externos y cero destinos SSH**, incluso si eliminas el último perfil. Desactivar el control restaura explícitamente la herencia de recursos del proyecto.
+
+### Alcance de la restricción
+
+Los trabajadores restringidos conservan herramientas nativas de archivos, pero no una terminal general, ejecución arbitraria de código, navegación web ni subagentes. El MCP interno `ao_control` transporta fases y preguntas. Las comprobaciones que requieren terminal necesitan un MCP de confianza o un revisor independiente.
+
+Las reglas de archivos protegen `~/.ssh`, la configuración de autenticación, el estado privado y las identidades del proyecto. Los permisos no se aplican retroactivamente: no se pueden cambiar mientras haya agentes activos, y el trabajador verifica que la política no haya cambiado antes de arrancar.
+
+Esta es una frontera de herramientas del CLI, **no un sandbox del sistema operativo ni un firewall**. Los MCP autorizados y las cuentas remotas conservan sus permisos. Las sesiones ejecutadas fuera de este motor no reciben estas restricciones.
+
+## Servicio automático con systemd
+
+La unidad de ejemplo está en [deploy/systemd/agent-orchestrator.service](deploy/systemd/agent-orchestrator.service). Supone que el repositorio está en `~/Proyectos/agent-orchestrator`; ajusta `WorkingDirectory`, `ExecStart` y `PATH` a tu instalación.
+
+Detén primero cualquier panel independiente que esté usando el mismo puerto. Después:
 
 ```bash
-python3 plugins/agent-orchestrator/scripts/cli_agent_job.py routes
+mkdir -p ~/.config/systemd/user
+cp deploy/systemd/agent-orchestrator.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now agent-orchestrator.service
+```
 
-# Quality over cost: Sol is selected from the plan's automatic pool; Astra remains excluded.
-python3 plugins/agent-orchestrator/scripts/cli_agent_job.py launch \
-  --route quality-first \
-  --cli codex-cli \
-  --model gpt-5.6-sol \
-  --plan-id <plan-id> \
-  --checklist-item item-001 \
-  --workspace /path/to/worktree \
-  --task-file /path/to/task.md \
+La unidad inicia el panel en `http://127.0.0.1:44509`, no abre el navegador y reinicia el proceso ante fallos. Está configurada para detener solo el panel y conservar los trabajadores independientes.
+
+```bash
+systemctl --user status agent-orchestrator
+systemctl --user restart agent-orchestrator
+systemctl --user stop agent-orchestrator
+journalctl --user -u agent-orchestrator -n 50
+```
+
+Para abrir la URL autenticada del servicio:
+
+```bash
+python3 plugins/agent-orchestrator/scripts/cli_agent_job.py ensure-dashboard
+```
+
+El servicio conserva su token privado en `dashboard-service-token.json` con permisos `0600`; las pestañas siguen autenticadas después de reiniciarlo. El modo en primer plano genera un token nuevo en cada arranque.
+
+Una unidad de usuario habilitada arranca con el gestor de usuario. Para que funcione desde el arranque del equipo sin iniciar sesión, habilita *lingering* si la política de tu sistema lo permite:
+
+```bash
+loginctl enable-linger "$USER"
+```
+
+La elección de carpetas requiere una sesión gráfica disponible, aunque el servicio pueda arrancar antes.
+
+## Uso desde el CLI
+
+Desde la raíz del repositorio, puedes definir un atajo para esta sesión:
+
+```bash
+ao() { python3 plugins/agent-orchestrator/scripts/cli_agent_job.py "$@"; }
+ao --help
+```
+
+### Crear un plan y lanzar una tarea
+
+```bash
+ao create-plan \
+  --title 'Mejorar autenticación' \
+  --workspace /ruta/al/proyecto \
+  --plan-file /ruta/al/plan.md \
+  --executor 'claude-code=sonnet' \
   --json
 
-# Fully custom: Astra coordinates; Claude Code executes with Sonnet.
-python3 plugins/agent-orchestrator/scripts/cli_agent_job.py launch \
-  --coordinator-model gpt-6-astra \
+ao launch \
   --cli claude-code \
   --model sonnet \
-  --approved-executor 'claude-code=sonnet' \
-  --reasoning-effort high \
-  --workspace /path/to/worktree \
-  --task-file /path/to/task.md \
-  --json
-```
-
-The route does not lock execution to Codex CLI. For example, Luna can coordinate while Claude Code,
-Kimi Code, Grok, Cursor, Devin, Gemini, DeepSeek Harness, OpenCode, or a custom adapter executes. Codex first
-presents what is actually installed, then the selected harness's available model and agent choices.
-
-The coordinator model override is workflow metadata, not a model switch. Select the desired model
-for the Codex task itself. Model availability and billing depend on your account and provider.
-Using Astra for planning or review does not approve it for implementation. Only an explicit
-`maximum-quality` plan or explicit expensive executor selection does.
-
-Workspace isolation is also user-controlled and remembered locally:
-
-```bash
-# Opt out of extra worktrees for this and future orchestrations.
-python3 plugins/agent-orchestrator/scripts/cli_agent_job.py preferences \
-  --workspace-mode project
-
-# Restore isolated worktrees later.
-python3 plugins/agent-orchestrator/scripts/cli_agent_job.py preferences \
-  --workspace-mode worktree
-```
-
-Project mode does not weaken writer locks, dirty-worktree baselines, scope limits, or review gates.
-
-## Resolve and lock the executor pool
-
-When the user invokes Agent Orchestrator without naming an executor, the default is automatic
-`cost-first`. Saying “quality over cost” selects `quality-first`. Only an explicit maximum/frontier
-request enables `maximum-quality`. Risk controls reasoning effort; it does not relax review gates:
-
-```bash
-python3 plugins/agent-orchestrator/scripts/cli_agent_job.py create-plan \
-  --title 'Authentication refresh' \
-  --workspace /path/to/project \
-  --plan-file /path/to/plan.md \
-  --strategy quality-first \
-  --risk high \
-  --task-type security \
-  --topology auto \
-  --max-parallel 3 \
-  --json
-```
-
-The plan records every installed CLI/model choice, rank, effort, rationale, and authorization
-source. `auto` uses one worker for tightly coupled or judgment-heavy work and a cross-harness team
-only when the checklist has independent, safely isolated roles. Use `--topology single` or
-`--topology cross-harness` to make that decision explicit. To rank a discovered cross-harness
-candidate set before locking it:
-
-```bash
-python3 plugins/agent-orchestrator/scripts/cli_agent_job.py recommend-executors \
-  --strategy quality-first \
-  --risk high \
-  --task-type debugging \
-  --candidate 'codex-cli=gpt-5.6-sol' \
-  --candidate 'devin=swe-2' \
-  --candidate 'grok=grok-4.6' \
-  --json
-```
-
-The bundled evidence catalog links to SWE-bench, Terminal-Bench, LiveCodeBench, Aider, and official
-provider model catalogs. Its capability tiers are transparent routing heuristics—not fabricated
-benchmark scores—and every output names the evidence date and sources. Task-specific local history
-changes ordering only after three independently reviewed jobs; overall history needs five. Explicit
-user selections and the no-silent-Astra rule always win.
-
-If the user names a custom set, persist exactly that set instead:
-
-```bash
-python3 plugins/agent-orchestrator/scripts/cli_agent_job.py create-plan \
-  --title 'Authentication refresh' \
-  --workspace /path/to/project \
-  --plan-file /path/to/plan.md \
-  --executor 'devin=swe-2' \
-  --executor 'grok=grok-4.6' \
-  --executor 'opencode' \
-  --terra-fallback-after-seconds 900 \
-  --json
-
-python3 plugins/agent-orchestrator/scripts/cli_agent_job.py set-executors <plan-id> \
-  --executor 'devin=swe-2' \
-  --executor 'grok=grok-4.6' \
-  --terra-fallback-after-seconds 900 \
-  --json
-```
-
-`CLI=MODEL` is exact. A bare CLI is permitted only for adapters such as DeepSeek Harness that cannot
-select a model themselves, and means the user knowingly approved that configured default. Astra, Fable,
-Opus, and other known expensive/frontier choices in a custom pool belong under
-`--expensive-executor`, which records that the user accepted execution cost rather than merely
-using that model to plan or review. Automatic `quality-first` is the narrow exception for Sol/Opus
-because the user's quality-over-cost wording is itself recorded authorization; it never adds Astra.
-
-The optional Terra fallback must also be disclosed up front. It does not run merely because a
-worker is quiet: every primary entry must have been attempted, a linked question must be visible in
-the active Codex chat and dashboard, the question must remain unanswered for the configured grace
-period, and the fallback task packet must be under 32 KiB. Astra is never an automatic fallback.
-
-## One prompt to a durable plan
-
-For every Agent Orchestrator run, Codex turns the original request into a plan with
-decisions, guardrails, validation strategy, completion criteria, and bounded checklist items. Users
-do not need to create a plan in another harness or manually transfer context.
-
-```bash
-python3 plugins/agent-orchestrator/scripts/cli_agent_job.py create-plan \
-  --title 'Authentication refresh' \
-  --workspace /path/to/project \
-  --plan-file /path/to/plan.md \
-  --strategy cost-first \
-  --risk medium \
-  --json
-
-python3 plugins/agent-orchestrator/scripts/cli_agent_job.py launch \
-  --route cost-first \
-  --cli codex-cli \
-  --model gpt-5.6-terra \
-  --plan-id <plan-id> \
+  --plan-id ID_DEL_PLAN \
   --checklist-item item-001 \
-  --workspace /path/to/worktree \
-  --task-file /path/to/item-001.md \
-  --json
-
-python3 plugins/agent-orchestrator/scripts/cli_agent_job.py plan-status <plan-id> --json
-python3 plugins/agent-orchestrator/scripts/cli_agent_job.py plan-checkpoint <plan-id> --json
-python3 plugins/agent-orchestrator/scripts/cli_agent_job.py executor-options <plan-id> \
-  --checklist-item item-001 --json
-```
-
-Built-in routes cap a task capsule at 64 KiB. Oversized packets are stopped with guidance to create
-a plan and split the work. This keeps the executor focused and preserves the complete workflow in
-durable state instead of an ever-growing model transcript.
-
-Use `plan-checkpoint` for every automatic continuation. It returns only the goal, next item,
-completed items, active/unreviewed jobs, pending feedback, and aggregate provider usage. Use
-`metrics --since-hours 24 --json` to compare recent attempts, reviewed acceptance, failures, and
-reported usage by CLI/model. Missing usage is unavailable, never zero.
-
-## Typical delegated flow
-
-Ask Codex naturally, for example:
-
-> Use Kimi Code with the default agent for this implementation. Give it exact file-level
-> instructions, keep me notified, answer its questions, and review the final diff and tests. Do
-> not use any other executor unless I approve it.
-
-Codex will inspect the repository first, produce a task packet with the required objective, why,
-scope, file, implementation, constraint, acceptance, validation, and reporting sections, then run:
-
-```bash
-python3 plugins/agent-orchestrator/scripts/cli_agent_job.py launch \
-  --cli kimi-code \
-  --model <approved-kimi-model> \
-  --cli-agent default \
-  --approved-executor 'kimi-code=<approved-kimi-model>' \
-  --workspace /path/to/worktree \
-  --task-file /path/to/task.md \
-  --allow-path 'packages/target/**' \
-  --deny-path '.env*' \
-  --max-changed-files 12 \
-  --timeout-seconds 7200 \
+  --workspace /ruta/al/proyecto \
+  --task-file /ruta/a/tarea.md \
   --json
 ```
 
-Useful observability and communication commands:
+El contrato de tarea debe incluir objetivo, justificación, alcance, archivos, instrucciones, restricciones, criterios de aceptación, validación e informe final. Sus encabezados técnicos se conservan en inglés para el validador. Consulta [el formato del contrato](plugins/agent-orchestrator/skills/orchestrate-cli-agents/references/task-contract.md).
+
+### Revisar y aceptar
 
 ```bash
-python3 plugins/agent-orchestrator/scripts/cli_agent_job.py observe <job-id> --json
-python3 plugins/agent-orchestrator/scripts/cli_agent_job.py watch <job-id>
-python3 plugins/agent-orchestrator/scripts/cli_agent_job.py dashboard --watch --group <group>
-python3 plugins/agent-orchestrator/scripts/cli_agent_job.py questions <job-id> --json
-python3 plugins/agent-orchestrator/scripts/cli_agent_job.py answer <job-id> <question-id> --file answer.md
-```
-
-When a worker genuinely fails or reaches its declared timeout, inspect `executor-options` and try
-an untried approved entry. Once the pool is exhausted, the orchestrator asks in the active Codex
-chat and creates the same linked dashboard question:
-
-```bash
-python3 plugins/agent-orchestrator/scripts/cli_agent_job.py request-feedback \
-  --workspace /path/to/project \
-  --plan-id <plan-id> \
-  --checklist-item item-001 \
-  --question-file /path/to/escalation-question.md \
-  --json
-```
-
-If the user answers, that answer wins. If the question remains pending past a pre-approved grace
-period, the runner can admit only the configured Terra fallback:
-
-```bash
-python3 plugins/agent-orchestrator/scripts/cli_agent_job.py launch \
-  --cli codex-cli \
-  --model gpt-5.6-terra \
-  --use-terra-fallback \
-  --feedback-id <pending-feedback-id> \
-  --plan-id <plan-id> \
-  --checklist-item item-001 \
-  --workspace /path/to/worktree \
-  --task-file /path/to/narrow-repair-task.md \
-  --json
-```
-
-The runner verifies pool exhaustion, feedback ownership/state/age, exact Terra selection, and the
-32 KiB fallback context limit. If Terra fails, execution stops for user direction; there is no
-second automatic escalation.
-
-Successful execution is deliberately not accepted work. Status remains `awaiting_review` until
-Codex inspects the diff, reruns tests, and records evidence:
-
-```bash
-python3 plugins/agent-orchestrator/scripts/cli_agent_job.py record-review <job-id> \
+ao record-review ID_DEL_TRABAJO \
   --verdict accepted \
   --reviewer current-codex-task \
-  --test 'pnpm test: passed' \
-  --notes-file /path/to/review.md \
+  --test 'Pruebas relevantes: correctas' \
+  --notes-file /ruta/a/revision.md \
   --json
 ```
 
-An accepted review completes the linked checklist item. `repair_required` keeps it in progress;
-`rejected` blocks it. Dependent jobs cannot start until prerequisite jobs are accepted. When a CLI
-emits JSONL token or cost fields, the latest provider-reported snapshot appears in status and
-observation output; missing usage means unavailable, not zero.
+Registra evidencia de comprobaciones que hayas ejecutado realmente. `accepted` completa el ítem vinculado; `repair_required` mantiene el trabajo pendiente y `rejected` lo bloquea. Las dependencias esperan a que sus predecesores sean aceptados.
 
-After acceptance, the orchestrator cleans up resources it created only for the run, such as
-temporary worktrees, disposable preview fixtures, scratch prompt/answer files, and stopped preview
-server state. It preserves user files and durable plans, job history, questions, review evidence,
-and audit events unless the user explicitly requests a purge. If ownership is uncertain, it leaves
-the resource in place and reports it.
-
-Runtime data is private to the local user and defaults to `~/.codex/agent-orchestrator/`. It is not
-part of this repository.
-
-## Local web dashboard
+### Preguntas y decisiones
 
 ```bash
-python3 plugins/agent-orchestrator/scripts/cli_agent_job.py ensure-dashboard --json
-python3 plugins/agent-orchestrator/scripts/cli_agent_job.py dashboard-web
-# Keep the browser closed and choose a port (0 asks the OS for a free port).
-python3 plugins/agent-orchestrator/scripts/cli_agent_job.py dashboard-web --no-open --port 0
+ao request-feedback \
+  --workspace /ruta/al/proyecto \
+  --question '¿Qué alcance debe cubrir la siguiente tarea?' \
+  --json
+
+ao feedback --workspace /ruta/al/proyecto --all --json
+ao answer-feedback ID_DEL_FEEDBACK --file respuesta.md --json
 ```
 
-The orchestration skill runs `ensure-dashboard` at the beginning of every session. It starts the
-private local server when needed, opens it, and otherwise reuses the healthy server registered for
-the current state home. This avoids duplicate dashboards while keeping all projects visible.
-`dashboard-web` remains available for foreground operation; Ctrl-C stops that server.
+Los trabajadores también pueden emitir preguntas desde su canal de trabajo. El panel las muestra y guarda las respuestas sin reiniciar el agente. Las respuestas duplicadas no sobrescriben una decisión ya guardada.
 
-The fixed project rail aggregates **all** repositories represented by jobs, feedback, or durable plans in
-`AGENT_ORCHESTRATOR_HOME` (default `~/.codex/agent-orchestrator/`), regardless of current directory or
-job group. A main checkout and all of its linked Git worktrees collapse into one project entry;
-the selected project's workers appear in a separate inner Agents rail. Only unanswered user
-questions create a project-level attention alert, so historical failures and unreviewed runs do not
-turn an old project into a permanent alarm. Select an inner agent and the center switches to that
-agent's work alone; select **Project overview** to return to the full project history.
-
-Select a project and an agent to see current work, phase, elapsed time, review state, recent
-messages, changed files, test evidence, and available provider usage. The Files tab reports changes
-relative to the recorded baseline; Tests shows independent review evidence. Missing measurements
-are labeled unavailable rather than estimated.
-
-The dashboard refreshes every two seconds. Filtering and inspector tabs preserve the current
-selection; polling preserves focused answers and unsent drafts. **Pause refresh** pauses only the
-browser refresh, not agent execution. Select **Project overview** for pending project decisions
-and answered feedback history. Worker questions appear in the selected worker's inspector. Type
-an answer and choose **Send answer** to save it durably; a waiting worker receives it without
-restarting. Concurrent or duplicate answers cannot overwrite an answered record.
-
-Coordinators can create reusable feedback separately from worker questions, even before any worker
-exists:
+### Aislamiento del workspace
 
 ```bash
-python3 plugins/agent-orchestrator/scripts/cli_agent_job.py request-feedback \
-  --workspace /path/to/project --question 'Which scope should the next item cover?' \
-  --context 'The current item is ready for review.' --json
-python3 plugins/agent-orchestrator/scripts/cli_agent_job.py feedback --json
-python3 plugins/agent-orchestrator/scripts/cli_agent_job.py feedback --workspace /path/to/project --all --json
-python3 plugins/agent-orchestrator/scripts/cli_agent_job.py answer-feedback <feedback-id> --file answer.md --json
+# Preferir worktrees aislados.
+ao preferences --workspace-mode worktree
+
+# Trabajar en el checkout actual para futuras orquestaciones.
+ao preferences --workspace-mode project
 ```
 
-`request-feedback` also accepts `--question-file`, optional `--plan-id` / `--checklist-item` linkage,
-and `--no-notify`. Linked plans must belong to the same workspace. Feedback records and their audit
-events live under `feedback/<id>/`, with private directories and atomic user-only record writes.
-Worker and orchestrator answers share the same validation, locking, and audited state transition.
+La preferencia persiste localmente. El modo de proyecto conserva bloqueos de escritura, línea base de cambios, límites de alcance y revisión.
 
-### Loopback and privacy
+### Añadir otro CLI
 
-The dependency-free server binds only to `127.0.0.1`. Every API request requires a random per-server
-capability token. The launch URL carries that token in its fragment; the browser removes it from
-the visible URL and retains it in tab-scoped session storage so reloading works. Treat the printed
-URL as private local access. A restart generates a new token. There are no external assets,
-telemetry, remote network requests, or CORS access. Host and Origin checks, a restrictive CSP,
-no-store responses, frame blocking, a static-file allowlist, ID validation, and a 64 KiB JSON-body
-limit protect the local interface. HTTP mutations accept only an answer and never a filesystem path.
+Los adaptadores personalizados se definen en `~/.config/agent-orchestrator/agents.json`. Utilizan arrays de argumentos ejecutados directamente, sin interpolación de shell. El esquema y sus controles se describen en [configuración de adaptadores](plugins/agent-orchestrator/skills/orchestrate-cli-agents/references/adapter-config.md).
 
-Only the selected job can expose short, explicitly **Local / private** log tails (up to 8 KiB per
-stream). The overview excludes task packets, commands, raw logs, and absolute workspace fields.
-Progress and question text may still contain private repository content supplied by an agent.
-This is a local user interface, not a remote service or an isolation boundary against other
-processes already running with your user account. Do not proxy or share the capability URL.
+## Privacidad y datos locales
 
-New jobs put the worker wrapper and worker-authored events/questions in `jobs/<id>/channel/`.
-Codex CLI retains `--sandbox workspace-write` and receives only `--add-dir {channel_dir}` as its
-additional writable directory. Metadata, results, reviews, task packets, and runner lifecycle
-and answer-audit events stay outside that subtree. No user trust configuration is changed and no
-permission-bypass flag is used. The `{channel_dir}` placeholder is available to argv adapters;
-legacy jobs with root-level `events/` and `questions/` remain readable and answerable.
+El estado se guarda por defecto en `~/.codex/agent-orchestrator/`. Puedes cambiarlo mediante `AGENT_ORCHESTRATOR_HOME`.
 
-## Add another CLI
+| Archivo o carpeta | Contenido |
+| --- | --- |
+| `jobs/` | Trabajos, resultados, canales, preguntas, logs y revisiones. |
+| `plans/` | Planes, checklist y decisiones. |
+| `feedback/` | Consultas del coordinador y respuestas persistentes. |
+| `projects.json` | Registro de proyectos y políticas de acceso. |
+| `ssh-inventory-groups.json` | Etiquetas globales de hosts y entornos. |
+| `dashboard.json` | Registro del panel activo y URL autenticada. |
+| `dashboard-service-token.json` | Token persistente del servicio. |
 
-Create `~/.config/agent-orchestrator/agents.json`:
+Estos datos no forman parte del repositorio. No publiques las URL autenticadas, tokens, logs privados ni configuraciones con credenciales.
 
-```json
-{
-  "agents": {
-    "team-cli": {
-      "argv": ["team-agent", "run", "--prompt-file", "{prompt_file}"],
-      "prompt_transport": "file",
-      "model_args": ["--model", "{model}"],
-      "models": ["fast", "balanced"],
-      "cli_agent_args": ["--agent", "{cli_agent}"],
-      "cli_agents": ["builder", "reviewer"],
-      "reasoning_effort_args": ["--effort", "{reasoning_effort}"],
-      "maturity": "stable"
-    }
-  }
-}
-```
+El panel escucha exclusivamente en `127.0.0.1`. Cada petición API exige un token, y se comprueban `Host` y `Origin`. La URL inicial transporta el token en su fragmento; el navegador lo retira de la barra y lo conserva en el almacenamiento de la pestaña. El servidor utiliza CSP, bloqueo de iframes, respuestas sin caché, rutas estáticas explícitas y límites de tamaño de solicitudes.
 
-Adapters are argv arrays executed directly, never shell command strings. See the plugin's
-`adapter-config.md` reference for the complete schema and safety rules.
+La interfaz no carga assets externos ni telemetría. Los agentes y los MCP autorizados pueden comunicarse con sus propios proveedores. El panel es una herramienta local de usuario; no debe exponerse mediante un proxy público ni considerarse aislado de otros procesos de la misma cuenta.
 
-## Development
+Después de aceptar un trabajo, la limpieza conserva planes, historial y evidencias. No elimina recursos de propiedad incierta ni archivos del usuario.
+
+## Desarrollo y pruebas
 
 ```bash
 python3 -m unittest discover -s plugins/agent-orchestrator/tests -v
 python3 -m compileall -q plugins/agent-orchestrator/scripts
 python3 -m json.tool .agents/plugins/marketplace.json >/dev/null
 python3 -m json.tool plugins/agent-orchestrator/.codex-plugin/plugin.json >/dev/null
+node --check plugins/agent-orchestrator/web/app.js
+node --check plugins/agent-orchestrator/web/actions.js
+node --check plugins/agent-orchestrator/web/i18n.js
 ```
 
-Contributions for new CLI adapters, better structured event parsing, and cross-platform
-notifications are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md)
-before opening a pull request.
+Node solo es necesario para estas comprobaciones de sintaxis; el panel no lo requiere en ejecución. Las pruebas automatizadas utilizan estado temporal y proveedores simulados para comprobar el motor, la API, los proyectos, los flujos, el inventario y las políticas sin consumir cuotas reales ni conectarse por SSH.
 
-## License
+Las comprobaciones visuales deben cubrir escritorio, un viewport de 390 px, navegación por teclado, movimiento reducido y consola sin errores. La integración con el selector de carpetas requiere además un escritorio Linux compatible.
 
-MIT. See [LICENSE](LICENSE).
+Para contribuir, consulta [CONTRIBUTING.md](CONTRIBUTING.md) y [SECURITY.md](SECURITY.md). El proyecto parte de [Augani/agent-orchestrator](https://github.com/Augani/agent-orchestrator).
+
+## Licencia
+
+[MIT](LICENSE).

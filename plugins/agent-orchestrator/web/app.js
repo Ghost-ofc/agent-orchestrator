@@ -20,7 +20,7 @@
     failed: job => FAILURE.has(job.state),
     complete: job => job.state === 'accepted',
   };
-  const state = { projects: [], project: null, agent: null, tab: 'messages', paused: false,
+  const state = { projects: [], allProjects: [], showArchived: false, pendingProject: null, project: null, agent: null, tab: 'messages', paused: false,
     filter: 'all', view: matchMedia('(max-width: 720px)').matches ? 'list' : 'canvas',
     generation: 0, refreshing: false, detail: null, transcript: null, followed: null, plan: null, planDetail: null, pendingPlan: null, pendingJob: null, feedback: [], drafts: new Map(),
     camera: { x: 32, y: 32, k: 1, fitted: null, touched: false }, world: { w: 0, h: 0 } };
@@ -47,7 +47,7 @@
   async function api(path, body) {
     const controller = new AbortController();
     // Reads stay short so a stuck poll cannot freeze the refresh; actions may wait for the engine.
-    const timeout = setTimeout(() => controller.abort(), body === undefined ? 15000 : 90000);
+    const timeout = setTimeout(() => controller.abort(), path === '/api/folders/pick' ? 200000 : body === undefined ? 15000 : 90000);
     try {
       const response = await fetch(path, { signal: controller.signal, method: body === undefined ? 'GET' : 'POST',
         cache: 'no-store', credentials: 'omit', headers: { 'X-Orchestrator-Token': token || '',
@@ -57,10 +57,10 @@
       try { data = await response.json(); } catch (_) { /* Reported through the status code below. */ }
       if (!response.ok) {
         const code = data?.code; const field = data?.field;
-        const message = code === 'invalid_request' ? t('err.invalid', { field: t(`field.${field}`) === `field.${field}` ? String(field) : t(`field.${field}`) })
+        const message = code?.startsWith('project_') ? data.error : code === 'invalid_request' ? t('err.invalid', { field: t(`field.${field}`) === `field.${field}` ? String(field) : t(`field.${field}`) })
           : code === 'engine_rejected' ? t('err.engine') : code === 'engine_timeout' ? t('err.engineTimeout')
           : t(errorKeys[response.status] || (body === undefined ? 'err.request' : 'err.save'));
-        throw new ApiError(message, { status: response.status, code, field, detail: code === 'engine_rejected' ? data.error : null });
+        throw new ApiError(message, { status: response.status, code, field, detail: code === 'engine_rejected' || (code === 'invalid_request' && ['workspace', 'name', 'mode', 'init_git'].includes(field)) ? data.error : null });
       }
       return data;
     } catch (error) {
@@ -201,7 +201,7 @@
   }
 
   // ---------- Canvas: project -> plans -> jobs, drawn only from real relations ----------
-  const NODE = { w: 248, jobH: 100, cardH: 88, gap: 12, cols: [0, 292, 584] };
+  const NODE = { w: 288, jobH: 124, cardH: 108, gap: 32, cols: [0, 360, 720] };
   function buildGraph(project, rows) {
     const grouped = new Map(project.plans.map(plan => [plan.plan_id, []]));
     const loose = [];
@@ -260,7 +260,8 @@
       card.dataset.tone = tone(job); card.dataset.jobId = job.job_id;
       card.setAttribute('aria-pressed', String(job.job_id === state.agent));
       card.querySelector('.dot').className = `dot ${tone(job)}`;
-      card.querySelector('.node-name').textContent = agentName(job);
+      card.querySelector('.node-name').textContent = job.role || agentName(job);
+      card.title = `${job.role || agentName(job)} · ${agentName(job)} · ${statusLabel(job)}`;
       card.querySelector('.node-badge').textContent = statusLabel(job);
       card.querySelector('.node-work').textContent = job.current_work || job.role || t('common.noProgress');
       card.querySelector('.node-meta').textContent = [job.model || job.cli, elapsed(job.elapsed_seconds), job.changed_files === null ? null : tn('count.files', job.changed_files)].filter(Boolean).join(' · ');
@@ -305,8 +306,9 @@
   function zoomCenter(factor) { const box = $('canvas'); zoomAt(factor, box.clientWidth / 2, box.clientHeight / 2); }
   function renderCanvas(project, rows) {
     // The empty message sits over the canvas only when there is nothing real to draw or the filter hides every job.
-    const message = !project ? t('canvas.empty') : !project.plans.length && !project.jobs.length ? t('table.noJobs') : project.jobs.length && !rows.length ? t('canvas.noMatch') : '';
+    const message = !project ? t('projects.empty') : !project.plans.length && !project.jobs.length ? t('projects.ready') : project.jobs.length && !rows.length ? t('canvas.noMatch') : '';
     $('canvas-empty').hidden = !message; $('canvas-empty').textContent = message;
+    $('canvas-empty').classList.toggle('project-ready', Boolean(project));
     $('canvas').hidden = !project;
     if (!project) { $('canvas-nodes').replaceChildren(); $('canvas-links').replaceChildren(); return; }
     const graph = buildGraph(project, rows);
@@ -377,6 +379,7 @@
     const selected = p?.jobs.find(job => job.job_id === state.agent) || null;
     const filtered = p ? p.jobs.filter(job => job.job_id === state.agent || FILTERS[state.filter](job)) : [];
     $('project-count').textContent = state.projects.length;
+    $('projects-empty').hidden = state.projects.length > 0;
     renderSummary(); renderAttention();
     reconcile($('projects'), state.projects, item => item.id, item => {
       const button = node('button', null, 'project-button'); button.type = 'button';
@@ -388,16 +391,15 @@
       button.setAttribute('aria-current', String(item.id === state.project));
       button.children[0].className = `dot ${tone(item)}`;
       button.querySelector('strong').textContent = item.name;
-      button.querySelector('small').textContent = item.question_count ? tn('rail.questions', item.question_count) : item.active ? t('rail.active', { active: tn('count.active', item.active), agents: tn('count.agents', item.jobs.length) }) : t('rail.history', { agents: tn('count.agents', item.jobs.length) });
+      button.classList.toggle('archived', Boolean(item.archived));
+      button.querySelector('small').textContent = item.archived ? t('projects.archived') : item.question_count ? tn('rail.questions', item.question_count) : item.active ? t('rail.active', { active: tn('count.active', item.active), agents: tn('count.agents', item.jobs.length) }) : t('rail.history', { agents: tn('count.agents', item.jobs.length) });
       button.querySelector('.count').textContent = item.jobs.length;
       button.title = `${item.name} · ${item.id}`;
     });
     actions.renderProjectActions(p);
     renderAgentNavigation(p);
-    $('project-title').textContent = selected ? agentName(selected) : p ? p.name : t('project.default');
-    $('project-subtitle').textContent = selected
-      ? `${selected.current_work || selected.role || t('project.agentWork')} · ${p.name}`
-      : p ? t('project.summary', { agents: tn('count.agents', p.jobs.length), plans: tn('count.plans', p.plans.length), ago: ago(p.updated_at) }) : t('project.empty');
+    $('project-title').textContent = p ? p.name : t('project.default');
+    $('project-subtitle').textContent = p ? t('project.summary', { agents: tn('count.agents', p.jobs.length), plans: tn('count.plans', p.plans.length), ago: ago(p.updated_at) }) : t('project.empty');
     $('filter').disabled = state.view === 'list' && Boolean(selected);
     $('filter').value = state.filter;
     const health = $('health'); health.replaceChildren();
@@ -452,26 +454,31 @@
   function focusTarget(pid, job) {
     $('notice').textContent = '';
     state.project = pid; state.agent = job; state.plan = null;
+    document.body.classList.add('inspector-open');
     setTab('messages'); clearInspector(); renderOverview(); loadDetail();
   }
   function selectProject(id) {
     if (state.project === id) return;
     $('notice').textContent = '';
     state.project = id;
+    document.body.classList.remove('inspector-open');
     state.agent = null; state.plan = null;
     state.feedback = []; clearInspector(); renderOverview(); loadDetail();
   }
   function selectAgent(id) {
-    if (state.agent === id && state.plan === null) return;
+    if (state.agent === id && state.plan === null) { document.body.classList.add('inspector-open'); return; }
     $('notice').textContent = '';
+    document.body.classList.add('inspector-open');
     state.agent = id; state.plan = null; clearInspector(); renderOverview(); loadDetail();
   }
   function selectPlan(id) {
-    if (state.plan === id) return;
+    if (state.plan === id) { document.body.classList.add('inspector-open'); return; }
     $('notice').textContent = '';
+    document.body.classList.add('inspector-open');
     state.plan = id; state.agent = null; clearInspector(); renderOverview(); loadDetail();
   }
   function selectOrchestrator() {
+    document.body.classList.add('inspector-open');
     $('notice').textContent = '';
     if (state.agent !== null || state.plan !== null) { state.agent = null; state.plan = null; clearInspector(); renderOverview(); }
     setTab('messages'); loadDetail();
@@ -754,8 +761,10 @@
     if (state.refreshing) return;
     state.refreshing = true;
     try {
-      const data = await api('/api/overview'); state.projects = data.projects;
+      const data = await api('/api/overview'); state.allProjects = data.projects;
+      state.projects = data.projects.filter(project => state.showArchived || !project.archived);
       if (!selectedProject()) {
+        document.body.classList.remove('inspector-open');
         state.project = state.projects[0]?.id || null;
         state.agent = null;
         clearInspector();
@@ -777,6 +786,7 @@
     if (state.view === view) return;
     state.view = view; state.camera.fitted = null; renderOverview();
   }
+  $('show-archived').addEventListener('change', event => { state.showArchived = event.target.checked; refresh(); });
   $('view-canvas').addEventListener('click', () => setView('canvas'));
   $('view-list').addEventListener('click', () => setView('list'));
   $('filter').addEventListener('change', event => { state.filter = event.target.value; renderOverview(); });
@@ -785,6 +795,8 @@
     setRefreshText(); setConnection(state.paused ? 'neutral' : 'green', state.paused ? 'connection.paused' : 'connection.ok');
     if (!state.paused) refresh();
   });
+  $('close-inspector').addEventListener('click', () => { document.body.classList.remove('inspector-open'); });
+  document.addEventListener('keydown', event => { if (event.key === 'Escape' && !document.querySelector('dialog[open]')) document.body.classList.remove('inspector-open'); });
   $('show-messages').addEventListener('click', () => setTab('messages', true));
   const tabs = [...document.querySelectorAll('[data-tab]')];
   tabs.forEach((button, index) => {
@@ -795,7 +807,7 @@
     });
   });
   function updateClock() { $('clock').textContent = `${dateLong(new Date())} · ${when(new Date().toISOString())}`; }
-  const actions = window.AOActions({ state, $, node, t, tn, st, api, reconcile, dot, tone, agentName, FAILURE, refresh, selectPlan, selectAgent, selectOrchestrator, selectedProject });
+  const actions = window.AOActions({ state, $, node, t, tn, st, api, reconcile, dot, tone, agentName, FAILURE, refresh, selectPlan, selectAgent, selectOrchestrator, selectProject, selectedProject });
   clearInspector(); setRefreshText(); setConnection('blue', 'connection.connecting');
   $('project-title').textContent = t('project.default'); $('project-subtitle').textContent = t('project.connecting');
   $('agent-navigation-empty').textContent = t('agents.select');

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="dark">
   <title>Agent Orchestrator</title>
-  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/logo.png" type="image/png">
   <link rel="stylesheet" href="/styles.css">
   <script src="/i18n.js" defer></script>
   <script src="/actions.js" defer></script>
@@ -14,7 +14,7 @@
 <body>
   <a class="skip-link" href="#project-title" data-i18n="a11y.skip"></a>
   <header class="topbar">
-    <div class="brand"><span class="brand-mark" aria-hidden="true">AO</span><span class="brand-name">Agent Orchestrator</span></div>
+    <div class="brand"><img class="brand-mark" src="/logo.png" alt="" width="28" height="28"><span class="brand-name">Agent Orchestrator</span></div>
     <ul class="totals" data-i18n-aria="summary.label">
       <li id="sum-running" data-tone="blue"><strong>0</strong><span data-i18n="summary.running"></span></li>
       <li id="sum-waiting" data-tone="amber"><strong>0</strong><span data-i18n="summary.waiting"></span></li>
@@ -37,13 +37,16 @@
   <div class="shell">
     <aside class="rail" data-i18n-aria="rail.label">
       <div class="rail-label"><span data-i18n="rail.projects"></span><span id="project-count" class="pill">0</span></div>
+      <button id="new-project" type="button" class="primary" data-i18n="projects.new"></button>
+      <label class="archived-toggle choice"><input id="show-archived" type="checkbox"><span data-i18n="projects.showArchived"></span></label>
       <nav id="projects" data-i18n-aria="rail.label"><p class="empty" data-i18n="rail.loading"></p></nav>
-      <footer class="rail-footer"><time id="clock"></time><span class="privacy" data-i18n="rail.privacy"></span></footer>
-    </aside>
-    <aside class="agents-sidebar" data-i18n-aria="agents.label">
+      <p id="projects-empty" class="empty" data-i18n="projects.empty" hidden></p>
+    <section class="agents-sidebar" data-i18n-aria="agents.label">
       <header class="agents-nav-header"><div><h2 data-i18n="agents.title"></h2><p data-i18n="agents.subtitle"></p></div><span id="agent-count" class="pill">0</span></header>
       <nav id="agent-navigation" data-i18n-aria="agents.listLabel"></nav>
       <p id="agent-navigation-empty" class="empty"></p>
+    </section>
+      <footer class="rail-footer"><time id="clock"></time><span class="privacy" data-i18n="rail.privacy"></span></footer>
     </aside>
     <main id="main">
       <header class="project-header">
@@ -66,6 +69,8 @@
           <option value="failed" data-i18n="filter.failed"></option>
           <option value="complete" data-i18n="filter.complete"></option>
         </select>
+        <button id="manage-project" type="button" data-i18n="projects.manage" hidden></button>
+        <button id="new-flow" type="button" class="primary" data-i18n="flow.new" hidden></button>
         <button id="new-plan" type="button" data-i18n="plan.new" hidden></button>
         <span id="refresh-status" class="muted"></span>
       </div>
@@ -93,9 +98,10 @@
       </section>
     </main>
     <aside class="inspector" data-i18n-aria="inspector.label">
-      <header class="inspector-header"><div><h2 id="inspector-title"></h2><p id="inspector-subtitle" class="muted"></p></div><button id="show-messages" type="button" data-i18n="inspector.messagesButton"></button></header>
+      <header class="inspector-header"><button id="close-inspector" type="button" class="close" data-i18n-aria="inspector.close">&times;</button><div><h2 id="inspector-title"></h2><p id="inspector-subtitle" class="muted"></p></div><button id="show-messages" type="button" data-i18n="inspector.messagesButton"></button></header>
       <div id="actions" class="actions" role="group" data-i18n-aria="actions.label" hidden></div>
       <p id="detail-status" class="muted" role="status"></p>
+      <p id="agent-access-info" class="muted access-applied" hidden></p>
       <section id="plans-list" class="plans-list" data-i18n-aria="plan.listLabel" hidden></section>
       <section id="plan-detail" class="plan-detail" data-i18n-aria="plan.detailLabel" hidden></section>
       <div id="agent-sections">
@@ -195,6 +201,7 @@
       <label for="launch-executor" data-i18n="launch.executor"></label>
       <select id="launch-executor" name="executor"></select>
       <small class="muted" id="launch-executor-help"></small>
+      <div id="launch-access-group" hidden><label for="launch-access-profile" data-i18n="access.workerProfile"></label><select id="launch-access-profile" name="access_profile"></select><small class="muted" id="launch-access-help"></small></div>
       <label for="launch-task" data-i18n="launch.task"></label>
       <textarea id="launch-task" name="task" rows="14" class="mono" spellcheck="false"></textarea>
       <small class="muted" data-i18n="launch.taskHelp"></small>
@@ -214,6 +221,110 @@
       <label class="choice confirm"><input type="checkbox" name="confirm"><span id="launch-confirm-text"></span></label>
       <div class="form-error" role="alert"></div>
       <footer><button type="button" data-close data-i18n="dialog.cancel"></button><button type="submit" class="primary" data-i18n="launch.submit"></button></footer>
+    </form>
+  </dialog>
+  <dialog id="dlg-flow" aria-labelledby="dlg-flow-title">
+    <form id="form-flow" class="dialog-form wide" novalidate>
+      <header><div><small class="eyebrow" data-i18n="flow.eyebrow"></small><h2 id="dlg-flow-title" data-i18n="flow.new"></h2></div><button type="button" class="close" data-close data-i18n-aria="dialog.close">&times;</button></header>
+      <p class="muted" data-i18n="flow.help"></p>
+      <label for="flow-title" data-i18n="plan.fieldTitle"></label><input id="flow-title" name="title" type="text" maxlength="200" required>
+      <label for="flow-goal" data-i18n="flow.goal"></label><textarea id="flow-goal" name="goal" rows="4" maxlength="5000" data-i18n-placeholder="flow.goalPlaceholder" required></textarea>
+      <fieldset><legend data-i18n="flow.coordinator"></legend><div class="grid-2">
+        <div><label for="flow-cli" data-i18n="flow.harness"></label><select id="flow-cli" name="cli"></select></div>
+        <div><label for="flow-model" data-i18n="plan.modelLabel"></label><input id="flow-model" name="model" type="text" list="flow-models" maxlength="128" required><datalist id="flow-models"></datalist></div>
+      </div><small class="muted" data-i18n="flow.coordinatorHelp"></small></fieldset>
+      <div id="flow-access-group" hidden><label for="flow-access-profile" data-i18n="access.coordinatorProfile"></label><select id="flow-access-profile" name="access_profile"></select><small class="muted" id="flow-access-help"></small></div>
+      <label for="flow-tasks" data-i18n="flow.tasks"></label><textarea id="flow-tasks" name="tasks" rows="3" maxlength="10000" data-i18n-placeholder="flow.tasksPlaceholder"></textarea>
+      <label for="flow-executors" data-i18n="flow.pool"></label><textarea id="flow-executors" name="executors" rows="2" maxlength="2000" placeholder="claude-code=sonnet&#10;opencode=opencode/deepseek-v4.1-flash-free"></textarea>
+      <small class="muted" data-i18n="flow.poolHelp"></small>
+      <details><summary data-i18n="plan.advanced"></summary><label for="flow-expensive" data-i18n="plan.fieldExpensive"></label><textarea id="flow-expensive" name="expensive_executors" rows="2" maxlength="1000"></textarea><small class="muted" data-i18n="plan.expensiveHelp"></small></details>
+      <div class="grid-2"><div><label for="flow-strategy" data-i18n="plan.fieldStrategy"></label><select id="flow-strategy" name="strategy"></select></div><div><label for="flow-risk" data-i18n="plan.fieldRisk"></label><select id="flow-risk" name="risk"></select></div></div>
+      <label class="choice"><input type="checkbox" name="allow_dirty"><span data-i18n="launch.allowDirty"></span></label>
+      <label class="choice confirm"><input type="checkbox" name="confirm"><span data-i18n="flow.confirm"></span></label>
+      <div class="form-error" role="alert"></div>
+      <footer><button type="button" data-close data-i18n="dialog.cancel"></button><button type="submit" class="primary" data-i18n="flow.start"></button></footer>
+    </form>
+  </dialog>
+  <dialog id="dlg-proposal" aria-labelledby="dlg-proposal-title">
+    <form id="form-proposal" class="dialog-form wide" novalidate>
+      <header><h2 id="dlg-proposal-title" data-i18n="flow.proposal"></h2><button type="button" class="close" data-close data-i18n-aria="dialog.close">&times;</button></header>
+      <p class="muted" data-i18n="flow.proposalHelp"></p><div id="proposal-tasks"></div>
+      <div class="form-error" role="alert"></div>
+      <footer><button type="button" data-close data-i18n="dialog.cancel"></button><button type="submit" class="primary" data-i18n="flow.accept"></button></footer>
+    </form>
+  </dialog>
+  <dialog id="dlg-project" aria-labelledby="dlg-project-title">
+    <form id="form-project" class="dialog-form" novalidate>
+      <header><h2 id="dlg-project-title" data-i18n="projects.new"></h2><button type="button" class="close" data-close data-i18n-aria="dialog.close">&times;</button></header>
+      <p class="muted" data-i18n="projects.newHelp"></p>
+      <label for="project-name" data-i18n="projects.name"></label><input id="project-name" name="name" type="text" maxlength="100" required>
+      <label for="project-mode" data-i18n="projects.mode"></label><select id="project-mode" name="mode"><option value="new" data-i18n="projects.modeNew"></option><option value="existing" data-i18n="projects.modeExisting"></option></select>
+      <label for="project-workspace" data-i18n="projects.folder"></label><div class="folder-picker-row"><input id="project-workspace" name="workspace" type="text" maxlength="2000" placeholder="~/Proyectos/mi-app" required><button id="project-pick-folder" type="button" data-i18n="projects.pickParent"></button></div>
+      <div id="project-folder-name-group"><label for="project-folder-name" data-i18n="projects.folderName"></label><input id="project-folder-name" name="folder_name" type="text" maxlength="100" placeholder="mi-app"><small class="muted" data-i18n="projects.folderNameHelp"></small></div>
+      <p id="project-picker-status" class="muted" role="status" aria-live="polite"></p>
+      <small class="muted" data-i18n="projects.folderHelp"></small>
+      <label id="project-git-choice" class="choice"><input name="init_git" type="checkbox" checked><span data-i18n="projects.initGit"></span></label>
+      <div class="form-error" role="alert"></div>
+      <footer><button type="button" data-close data-i18n="dialog.cancel"></button><button type="submit" class="primary" data-i18n="projects.add"></button></footer>
+    </form>
+  </dialog>
+  <dialog id="dlg-project-manage" aria-labelledby="dlg-project-manage-title">
+    <form id="form-project-manage" class="dialog-form" novalidate>
+      <header><h2 id="dlg-project-manage-title" data-i18n="projects.manage"></h2><button type="button" class="close" data-close data-i18n-aria="dialog.close">&times;</button></header>
+      <p id="manage-project-folder" class="muted project-folder"></p>
+      <button id="project-access-settings" type="button" data-i18n="access.title"></button>
+      <label for="manage-project-name" data-i18n="projects.name"></label><input id="manage-project-name" name="name" type="text" maxlength="100" required>
+      <label for="manage-project-action" data-i18n="projects.action"></label><select id="manage-project-action" name="action"></select>
+      <p id="manage-project-help" class="muted"></p>
+      <label id="manage-project-confirm" class="choice confirm" hidden><input name="confirm" type="checkbox"><span data-i18n="projects.deleteConfirm"></span></label>
+      <div class="form-error" role="alert"></div>
+      <footer><button type="button" data-close data-i18n="dialog.cancel"></button><button type="submit" class="primary" data-i18n="projects.save"></button></footer>
+    </form>
+  </dialog>
+  <dialog id="dlg-access" aria-labelledby="dlg-access-title">
+    <form id="form-access" class="dialog-form wide" novalidate>
+      <header><h2 id="dlg-access-title" data-i18n="access.title"></h2><button type="button" class="close" data-close data-i18n-aria="dialog.close">&times;</button></header>
+      <p class="muted" data-i18n="access.help"></p>
+      <label class="choice"><input id="access-enabled" name="enabled" type="checkbox"><span data-i18n="access.enabled"></span></label>
+      <p class="access-boundary muted" data-i18n="access.boundary"></p>
+      <fieldset id="access-resources"><legend data-i18n="access.resources"></legend>
+        <h3 data-i18n="access.mcp"></h3><p class="muted" data-i18n="access.mcpHelp"></p><div id="access-mcp-list"></div>
+        <h3 data-i18n="access.ssh"></h3><p class="muted" data-i18n="access.sshHelp"></p>
+        <div class="ssh-import">
+          <div class="plans-head"><h3 data-i18n="access.sshConfig"></h3><button id="access-refresh-ssh" type="button" data-i18n="access.refreshSsh"></button></div>
+          <p id="access-ssh-summary" class="muted"></p><div id="access-ssh-warnings" class="muted"></div>
+          <label for="access-ssh-search" data-i18n="access.searchInventory"></label><input id="access-ssh-search" type="search">
+          <label for="access-import-host" data-i18n="access.detectedHost"></label><select id="access-import-host"></select>
+          <label for="access-import-key" data-i18n="access.detectedKey"></label><select id="access-import-key"></select>
+          <p id="access-import-detail" class="muted"></p><button id="access-import-ssh" type="button" data-i18n="access.useSsh"></button>
+          <details><summary data-i18n="access.organize"></summary>
+            <p class="muted" data-i18n="access.organizationHelp"></p>
+            <div class="grid-2"><div><label for="access-host-group" data-i18n="access.group"></label><input id="access-host-group" maxlength="80" list="access-known-groups"><datalist id="access-known-groups"></datalist></div>
+            <div><label for="access-host-environment" data-i18n="access.environment"></label><select id="access-host-environment"><option value="unknown" data-i18n="access.env.unknown"></option><option value="development" data-i18n="access.env.development"></option><option value="testing" data-i18n="access.env.testing"></option><option value="production" data-i18n="access.env.production"></option></select></div></div>
+            <button id="access-save-organization" type="button" data-i18n="access.saveOrganization"></button><p id="access-organization-status" role="status" class="muted"></p>
+          </details>
+          <details><summary data-i18n="access.keyInventory"></summary><ul id="access-key-inventory"></ul></details>
+        </div>
+        <ul id="access-ssh-list"></ul>
+        <div class="grid-2">
+          <div><label for="access-host-name" data-i18n="access.alias"></label><input id="access-host-name" type="text" placeholder="staging" maxlength="64"></div>
+          <div><label for="access-host-address" data-i18n="access.host"></label><input id="access-host-address" type="text" placeholder="staging.example.com" maxlength="253"></div>
+          <div><label for="access-host-user" data-i18n="access.user"></label><input id="access-host-user" type="text" placeholder="deploy" maxlength="64"></div>
+          <div><label for="access-host-port" data-i18n="access.port"></label><input id="access-host-port" type="number" min="1" max="65535" value="22"></div>
+        </div>
+        <label for="access-host-key" data-i18n="access.key"></label><input id="access-host-key" type="text" placeholder="~/.ssh/id_ed25519" maxlength="2000">
+        <button id="access-add-host" type="button" data-i18n="access.addHost"></button>
+        <label class="choice"><input id="access-per-agent" type="checkbox"><span data-i18n="access.perAgent"></span></label><p class="muted" data-i18n="access.perAgentHelp"></p>
+        <section id="access-profile-fields" class="access-profiles"><h3 data-i18n="access.profiles"></h3><p class="muted" data-i18n="access.profilesHelp"></p>
+          <ul id="access-profile-list"></ul>
+          <label for="access-profile-name" data-i18n="access.profileName"></label><input id="access-profile-name" type="text" maxlength="64" placeholder="backend">
+          <h4 data-i18n="access.profileMcp"></h4><div id="access-profile-mcp"></div>
+          <h4 data-i18n="access.profileSsh"></h4><div id="access-profile-ssh"></div>
+          <button id="access-add-profile" type="button" data-i18n="access.addProfile"></button>
+        </section>
+      </fieldset>
+      <div class="form-error" role="alert"></div>
+      <footer><button type="button" data-close data-i18n="dialog.cancel"></button><button type="submit" class="primary" data-i18n="access.save"></button></footer>
     </form>
   </dialog>
 </body>

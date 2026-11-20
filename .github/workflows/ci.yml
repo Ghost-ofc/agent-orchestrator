@@ -19,7 +19,7 @@ jobs:
         run: |
           python3 -m json.tool .agents/plugins/marketplace.json >/dev/null
           python3 -m json.tool plugins/agent-orchestrator/.codex-plugin/plugin.json >/dev/null
-      - name: Compile runner
-        run: python3 -m py_compile plugins/agent-orchestrator/scripts/cli_agent_job.py
+      - name: Compile Python modules
+        run: python3 -m compileall -q plugins/agent-orchestrator/scripts
       - name: Run tests
         run: python3 -m unittest discover -s plugins/agent-orchestrator/tests -v

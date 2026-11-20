@@ -16,6 +16,10 @@ from pathlib import Path
 
 import cli_agent_job as jobs
 import panel_actions
+import native_folders
+import project_access
+import ssh_inventory
+from project_identity import project_root, project_id, project_identity
 from agent_transcript import read_transcript
 
 WEB_ROOT = Path(__file__).resolve().parents[1] / "web"
@@ -25,6 +29,7 @@ STATIC = {
     "/styles.css": ("styles.css", "text/css; charset=utf-8"),
     "/i18n.js": ("i18n.js", "text/javascript; charset=utf-8"),
     "/favicon.svg": ("favicon.svg", "image/svg+xml"),
+    "/logo.png": ("logo.png", "image/png"),
     "/actions.js": ("actions.js", "text/javascript; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
 }
@@ -33,71 +38,25 @@ MAX_ACTION_BODY = 262144
 ETAG_RE = re.compile(r"[0-9a-z-]{1,64}")
 ACTIVE = {"starting", "running", "needs_input", "cancelling"}
 FAILURE = {"failed", "lost", "scope_violated", "timed_out"}
+FOLDER_PICKER_LOCK = threading.Lock()
 
 
-def project_root(workspace: str) -> Path:
-    """Resolve linked Git worktrees to their shared repository checkout."""
-    literal = Path(workspace).resolve()
-    if not literal.is_dir():
-        return literal
-    dot_git = literal / ".git"
-    if dot_git.is_dir():
-        return literal
-    if dot_git.is_file():
-        try:
-            marker = dot_git.read_text(encoding="utf-8")
-        except (OSError, UnicodeError):
-            marker = ""
-        prefix = "gitdir: "
-        if marker.startswith(prefix) and "\x00" not in marker:
-            candidate = Path(marker[len(prefix) :].strip())
-            if not candidate.is_absolute():
-                candidate = literal / candidate
-            try:
-                git_dir = candidate.resolve()
-            except OSError:
-                git_dir = candidate
-            if (
-                git_dir.parent.name == "worktrees"
-                and git_dir.parent.parent.name == ".git"
-            ):
-                return git_dir.parent.parent.parent
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(literal), "rev-parse", "--git-common-dir"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return literal
-    lines = result.stdout.splitlines()
-    if (
-        result.returncode != 0
-        or len(lines) != 1
-        or not lines[0].strip()
-        or "\x00" in lines[0]
-    ):
-        return literal
-    common = Path(lines[0].strip())
-    if not common.is_absolute():
-        common = literal / common
-    try:
-        common = common.resolve()
-    except OSError:
-        return literal
-    return common.parent if common.is_dir() and common != literal else literal
+
+def project_registry_path() -> Path:
+    return jobs.state_home() / "projects.json"
 
 
-def project_identity(workspace: str) -> tuple[str, str]:
-    root = project_root(workspace)
-    pid = "p-" + hashlib.sha256(str(root).encode()).hexdigest()[:24]
-    return pid, root.name or "Workspace"
+def project_registry() -> dict:
+    path = project_registry_path()
+    return jobs.read_json(path) if path.exists() else {}
 
 
-def project_id(workspace: str) -> str:
-    return project_identity(workspace)[0]
+def visible_project(pid: str) -> dict:
+    jobs.validate_identifier(pid, "project")
+    entry = project_registry().get(pid, {})
+    if entry.get("deleted"):
+        raise jobs.RunnerError("Project removed from dashboard")
+    return entry
 
 
 def activity_key(item: dict) -> tuple:
@@ -197,6 +156,7 @@ class DashboardState:
             "model": status.get("model"),
             "cli_agent": status.get("cli_agent"),
             "role": status.get("role"),
+            "access": status.get("access"),
             "coordinator_model": status.get("coordinator_model")
             or "current-codex-task",
             "group": status.get("group"),
@@ -291,8 +251,18 @@ class DashboardState:
                 )
             except (jobs.RunnerError, KeyError, ValueError, TypeError):
                 skipped += 1
+        for pid, entry in project_registry().items():
+            if entry.get("deleted"):
+                projects.pop(pid, None)
+                continue
+            project = ensure_identity(pid, entry["name"])
+            project["name"] = entry["name"]
+            project["archived"] = bool(entry.get("archived"))
+            project["access_restricted"] = bool(entry.get("access_policy", {}).get("enabled"))
+            project["updated_at"] = max(project["updated_at"], entry.get("updated_at", ""))
         pending = []
         for project in projects.values():
+            project.setdefault("archived", False)
             project["jobs"].sort(key=activity_key, reverse=True)
             rows = project["jobs"]
             project["active"] = sum(bool(row["active"]) for row in rows)
@@ -343,7 +313,7 @@ class DashboardState:
         return project
 
     def verify_job(self, pid: str, job_id: str) -> Path:
-        jobs.validate_identifier(pid, "project")
+        visible_project(pid)
         path = jobs.job_dir(job_id)
         if project_id(jobs.read_json(path / "meta.json")["workspace"]) != pid:
             raise jobs.RunnerError("Unknown job in this project")
@@ -372,6 +342,7 @@ class DashboardState:
         return {
             **row,
             "events": events,
+            "has_flow": (path / "flow.json").is_file(),
             "questions": [
                 {
                     key: q.get(key)
@@ -397,8 +368,10 @@ class DashboardState:
         }
 
     def project_workspace(self, pid: str) -> str:
-        """Resolve a project ID to a workspace path from durable records; paths never reach clients."""
-        jobs.validate_identifier(pid, "project")
+        """Resolve a project ID to its registered folder or a workspace from durable history."""
+        registered = visible_project(pid)
+        if registered.get("workspace"):
+            return registered["workspace"]
         records = [
             jobs.read_json(path)
             for pattern, root in (("*/meta.json", jobs.jobs_dir()), ("*/plan.json", jobs.plans_dir()))
@@ -411,7 +384,7 @@ class DashboardState:
         raise jobs.RunnerError("Unknown project ID")
 
     def verified_plan(self, pid: str, plan_id: str) -> tuple[Path, dict]:
-        jobs.validate_identifier(pid, "project")
+        visible_project(pid)
         if not jobs.JOB_ID_RE.fullmatch(plan_id):
             raise jobs.RunnerError("Invalid plan ID")
         path, plan = jobs.read_plan(plan_id)
@@ -420,22 +393,198 @@ class DashboardState:
         return path, plan
 
     def plan(self, pid: str, plan_id: str) -> dict:
-        return panel_actions.plan_view(self.verified_plan(pid, plan_id)[1])
+        result = panel_actions.plan_view(self.verified_plan(pid, plan_id)[1])
+        project_policy = project_access.policy_for(Path(self.project_workspace(pid)), jobs.state_home())
+        result["access_policy"] = project_access.public_policy(project_policy)
+        if visible_project(pid).get("archived"):
+            for item in result["items"]:
+                item["can_launch"] = False
+        return result
 
     def launch_template(self, pid: str, job_id: str) -> dict:
         return panel_actions.launch_template(self.verify_job(pid, job_id))
 
+    def choose_folder(self, body: dict) -> dict:
+        body = panel_actions.only_fields(body, ("mode",), ("initial",))
+        mode = panel_actions.choice(body, "mode", ("existing", "new"))
+        initial = panel_actions.text(body, "initial", required=False, limit=2000, single_line=True)
+        folder = Path(initial).expanduser() if initial else Path.home()
+        if not folder.is_absolute():
+            raise panel_actions.invalid("initial", "La ruta inicial debe ser absoluta.")
+        if not folder.is_dir():
+            folder = folder.parent if folder.parent.is_dir() else Path.home()
+        if not FOLDER_PICKER_LOCK.acquire(blocking=False):
+            raise panel_actions.ActionError(409, "project_picker_busy", "Ya hay un selector de carpetas abierto en este equipo.")
+        try:
+            path = native_folders.pick_folder(folder, "Elegir carpeta del proyecto" if mode == "existing" else "Elegir dónde crear el proyecto")
+        except native_folders.FolderPickerError as exc:
+            raise panel_actions.ActionError(503, "project_picker_unavailable", str(exc)) from exc
+        finally:
+            FOLDER_PICKER_LOCK.release()
+        return {"cancelled": path is None, "path": path}
+
+    def create_project(self, body: dict) -> dict:
+        body = panel_actions.only_fields(body, ("name", "workspace", "mode"), ("init_git",))
+        name = panel_actions.text(body, "name", limit=100, single_line=True)
+        location = panel_actions.text(body, "workspace", limit=2000, single_line=True)
+        mode = panel_actions.choice(body, "mode", ("existing", "new"))
+        initialize = panel_actions.flag(body, "init_git")
+        workspace = Path(location).expanduser()
+        if not workspace.is_absolute():
+            raise panel_actions.invalid("workspace", "Usa una ruta absoluta, por ejemplo ~/Proyectos/mi-app.")
+        workspace = workspace.resolve()
+        registry_path = project_registry_path()
+        registry_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with jobs.record_lock(registry_path):
+            records = project_registry()
+            pid = project_id(str(workspace))
+            if pid in records and not records[pid].get("deleted"):
+                raise panel_actions.ActionError(409, "project_conflict", "Esta carpeta ya está en el panel.")
+            if mode == "new":
+                if workspace.exists() or not workspace.parent.is_dir():
+                    raise panel_actions.invalid("workspace", "La carpeta nueva no debe existir y su carpeta padre debe existir.")
+                if not initialize and (project_root(str(workspace.parent)) / ".git").exists():
+                    raise panel_actions.invalid("init_git", "Activa Git para crear un proyecto independiente dentro de otro repositorio.")
+                workspace.mkdir(mode=0o700)
+                if initialize:
+                    try:
+                        result = subprocess.run(["git", "-C", str(workspace), "init"],
+                                                capture_output=True, text=True, timeout=15, check=False)
+                    except (OSError, subprocess.TimeoutExpired) as exc:
+                        raise panel_actions.ActionError(422, "project_error", "La carpeta se creó, pero Git no pudo inicializarse. Puedes incorporarla como carpeta existente.") from exc
+                    if result.returncode:
+                        raise panel_actions.ActionError(422, "project_error", "La carpeta se creó, pero Git no pudo inicializarse. Puedes incorporarla como carpeta existente.")
+            elif not workspace.is_dir():
+                raise panel_actions.invalid("workspace", "La carpeta existente no está disponible.")
+            # Worktrees share a single entry with their main checkout.
+            workspace = project_root(str(workspace))
+            pid = project_id(str(workspace))
+            if pid in records and not records[pid].get("deleted"):
+                raise panel_actions.ActionError(409, "project_conflict", "Este repositorio ya está en el panel.")
+            records[pid] = {**records.get(pid, {}), "name": name, "workspace": str(workspace), "archived": False,
+                            "deleted": False, "updated_at": jobs.utc_now()}
+            jobs.write_json(registry_path, records)
+        return self.project(pid)
+
+    def organize_ssh(self, body: dict) -> dict:
+        body = panel_actions.only_fields(body, ("alias", "group", "environment"))
+        alias = panel_actions.text(body, "alias", limit=128, single_line=True)
+        group = panel_actions.text(body, "group", limit=80, single_line=True)
+        environment = panel_actions.choice(body, "environment", ssh_inventory.ENVIRONMENTS)
+        if environment is None:
+            raise panel_actions.invalid("environment")
+        catalog = ssh_inventory.inventory()
+        if not any(host["name"] == alias for host in catalog["hosts"]):
+            raise panel_actions.invalid("alias", "El host ya no está en el inventario SSH.")
+        path = ssh_inventory.organization_path()
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with jobs.record_lock(path):
+            organization = ssh_inventory.read_organization()
+            organization["hosts"][alias] = {"group": group, "environment": environment}
+            jobs.write_json(path, organization)
+        return ssh_inventory.inventory()
+
+    def access_settings(self, pid: str) -> dict:
+        self.project(pid)
+        workspace = Path(self.project_workspace(pid))
+        try:
+            definitions = project_access.mcp_definitions(workspace)
+            origins = project_access.mcp_origins(workspace)
+            policy = project_access.policy_for(workspace, jobs.state_home())
+        except (ValueError, OSError, project_access.AccessError) as exc:
+            raise panel_actions.ActionError(422, "project_access_error", "No se pudo leer la configuración MCP de este proyecto.") from exc
+        return {"policy": project_access.public_policy(policy), "ssh_inventory": ssh_inventory.inventory(),
+                "mcp_catalog": [{"name": name, "available": name in definitions, "source": origins.get(name, "Configuración guardada")} for name in sorted(set(definitions) | set(policy.get("mcp_servers", {})))]}
+
+    def save_access(self, pid: str, body: dict) -> dict:
+        registry_path = project_registry_path()
+        registry_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with jobs.record_lock(registry_path):
+            project = self.project(pid)
+            if project["active"]:
+                raise panel_actions.ActionError(409, "project_active", "Espera a que terminen los agentes antes de cambiar sus accesos.")
+            workspace = Path(self.project_workspace(pid))
+            try:
+                policy = project_access.normalize_policy(body, workspace, project_access.policy_for(workspace, jobs.state_home()))
+                if policy["enabled"]:
+                    profile = jobs.validate_profile("claude-code", jobs.BUILTIN_PROFILES["claude-code"])
+                    project_access.require_supported("claude-code", profile, profile)
+            except (ValueError, OSError, project_access.AccessError) as exc:
+                raise panel_actions.ActionError(422, "project_access_error", str(exc)) from exc
+            records = project_registry()
+            entry = records.get(pid) or {"name": project["name"], "workspace": str(workspace), "archived": False}
+            entry["access_policy"] = policy
+            entry["updated_at"] = jobs.utc_now()
+            records[pid] = entry
+            jobs.write_json(registry_path, records)
+        return self.access_settings(pid)
+
+    def project_settings(self, pid: str) -> dict:
+        project = self.project(pid)
+        return {"id": pid, "name": project["name"], "archived": project["archived"],
+                "workspace": self.project_workspace(pid), "active": project["active"]}
+
+    def update_project(self, pid: str, body: dict) -> dict:
+        body = panel_actions.only_fields(body, ("action",), ("name", "confirm"))
+        action = panel_actions.choice(body, "action", ("rename", "archive", "restore", "delete"))
+        name = panel_actions.text(body, "name", required=action == "rename", limit=100, single_line=True)
+        if action == "delete" and body.get("confirm") is not True:
+            raise panel_actions.invalid("confirm", "Confirma que quieres eliminar el proyecto del panel.")
+        registry_path = project_registry_path()
+        registry_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with jobs.record_lock(registry_path):
+            project = self.project(pid)
+            if action in {"archive", "delete"} and project["active"]:
+                raise panel_actions.ActionError(409, "project_active", "Hay agentes en ejecución. Deténlos o espera a que terminen antes de archivar o eliminar este proyecto.")
+            records = project_registry()
+            entry = records.get(pid) or {"workspace": self.project_workspace(pid), "name": project["name"], "archived": False}
+            if action == "rename":
+                entry["name"] = name
+            elif action in {"archive", "restore"}:
+                entry["archived"] = action == "archive"
+            elif action == "delete":
+                entry["deleted"] = True
+            entry["updated_at"] = jobs.utc_now()
+            records[pid] = entry
+            jobs.write_json(registry_path, records)
+        return {"id": pid, "deleted": action == "delete"}
+
     def act(self, parts: list[str], body: dict) -> dict:
         """Dispatch a state-changing request. The engine itself enforces every policy."""
+        if parts == ["api", "ssh", "organization"]:
+            return self.organize_ssh(body)
+        if len(parts) == 4 and parts[:2] == ["api", "projects"] and parts[3] == "access":
+            return self.save_access(parts[2], body)
+        if parts == ["api", "folders", "pick"]:
+            return self.choose_folder(body)
+        if parts == ["api", "projects"]:
+            return self.create_project(body)
+        if len(parts) == 4 and parts[:2] == ["api", "projects"] and parts[3] == "manage":
+            return self.update_project(parts[2], body)
         if len(parts) < 4 or parts[:2] != ["api", "projects"]:
             raise jobs.RunnerError("Unknown action route")
+        registry_path = project_registry_path()
+        registry_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with jobs.record_lock(registry_path):
+            return self.act_project(parts, body)
+
+    def act_project(self, parts: list[str], body: dict) -> dict:
+        # Serialize launches against archive/delete so no panel launch can race a lifecycle change.
         pid = parts[2]
+        registered = visible_project(pid)
+        if registered.get("archived") and (parts[3] in {"flows", "plans"}):
+            raise panel_actions.ActionError(409, "project_archived", "Restaura el proyecto antes de crear o ejecutar tareas.")
         if len(parts) == 6 and parts[3] == "jobs" and parts[5] in {"cancel", "review"}:
             self.verify_job(pid, parts[4])
             if parts[5] == "cancel":
                 return panel_actions.cancel_job(parts[4], body)
             review = panel_actions.review_job(parts[4], body)
             return {key: review.get(key) for key in ("review_id", "verdict", "reviewer", "reviewed_at", "tests", "notes")}
+        if len(parts) == 4 and parts[3] == "flows":
+            return panel_actions.start_flow(self.project_workspace(pid), body)
+        if len(parts) == 7 and parts[3] == "jobs" and parts[5:] == ["flow", "accept"]:
+            path = self.verify_job(pid, parts[4])
+            return panel_actions.plan_view(panel_actions.accept_flow(path, self.project_workspace(pid), body))
         if len(parts) == 4 and parts[3] == "plans":
             return panel_actions.plan_view(panel_actions.create_plan(self.project_workspace(pid), body))
         if len(parts) == 8 and parts[3] == "plans" and parts[5] == "items" and parts[7] == "launch":
@@ -486,7 +635,7 @@ class DashboardState:
             and parts[3] == "feedback"
             and parts[5] == "answer"
         ):
-            jobs.validate_identifier(parts[2], "project")
+            visible_project(parts[2])
             path = jobs.feedback_dir(parts[4])
             if (
                 project_id(jobs.read_json(path / "feedback.json")["workspace"])
@@ -616,8 +765,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 )
             elif self.path == "/api/overview":
                 data = self.server.state.overview()
+            elif len(parts) == 4 and parts[:2] == ["api", "projects"] and parts[3] == "access":
+                data = self.server.state.access_settings(parts[2])
+            elif len(parts) == 4 and parts[:2] == ["api", "projects"] and parts[3] == "settings":
+                data = self.server.state.project_settings(parts[2])
             elif self.path == "/api/executors":
                 data = panel_actions.executor_catalog()
+            elif len(parts) == 6 and parts[:2] == ["api", "projects"] and parts[3] == "jobs" and parts[5] == "flow":
+                data = panel_actions.flow_proposal(self.server.state.verify_job(parts[2], parts[4]))
             elif (
                 len(parts) == 5
                 and parts[:2] == ["api", "projects"]
@@ -746,8 +901,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             )
 
 
-def serve(port=0, open_browser=True) -> int:
+def serve(port=0, open_browser=True, token=None) -> int:
     with DashboardServer(port) as server:
+        if token is not None:
+            server.token = token
+            server.url = f"{server.origin}/#token={token}"
         runtime_path = jobs.dashboard_runtime_path()
         runtime = {
             "pid": os.getpid(),
@@ -756,7 +914,7 @@ def serve(port=0, open_browser=True) -> int:
             "started_at": jobs.utc_now(),
         }
         jobs.write_json(runtime_path, runtime)
-        print(f"Agent Orchestrator dashboard: {server.url}", flush=True)
+        print(f"Agent Orchestrator dashboard: {server.origin if token is not None else server.url}", flush=True)
         if open_browser:
             webbrowser.open(server.url)
         try:

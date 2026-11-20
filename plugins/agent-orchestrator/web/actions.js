@@ -16,6 +16,9 @@ window.AOActions = ctx => {
   const RETRYABLE = new Set(['rejected', 'repair_required', 'cancelled']);
   let catalog = null;
   let launching = null;
+  let proposing = null;
+  let flowProject = null;
+  let managedProject = null;
 
   const lines = value => String(value || '').split('\n').map(line => line.trim()).filter(Boolean);
   const form = id => $(`form-${id}`);
@@ -44,6 +47,7 @@ window.AOActions = ctx => {
         await run(element);
         dialog(id).close();
         await ctx.refresh();
+        if (state.pendingProject) { const id = state.pendingProject; state.pendingProject = null; ctx.selectProject(id); }
         // After creating a plan or launching a job, go straight to it.
         if (state.pendingPlan) { const plan = state.pendingPlan; state.pendingPlan = null; ctx.selectPlan(plan); }
         if (state.pendingJob) { const job = state.pendingJob; state.pendingJob = null; ctx.selectAgent(job); }
@@ -59,17 +63,270 @@ window.AOActions = ctx => {
     dialog(id).showModal();
   }
 
+  // Project lifecycle stays separate from plan/job execution.
+  $('new-project').addEventListener('click', () => { pickedParent = null; pickerGeneration++; $('project-pick-folder').disabled = false; form('project').elements.mode.disabled = false; open('project'); $('project-picker-status').textContent = ''; syncProjectMode(); });
+  let pickedParent = null;
+  let pickerGeneration = 0;
+  function syncProjectMode() {
+    const creating = form('project').elements.mode.value === 'new';
+    $('project-git-choice').hidden = !creating;
+    $('project-folder-name-group').hidden = !creating || !pickedParent;
+    $('project-pick-folder').textContent = t(creating ? 'projects.pickParent' : 'projects.pickFolder');
+  }
+  $('project-pick-folder').addEventListener('click', async () => {
+    const element = form('project'); const mode = element.elements.mode.value;
+    const generation = pickerGeneration;
+    const button = $('project-pick-folder'); const submit = element.querySelector('[type=submit]');
+    const workspace = element.elements.workspace;
+    const initial = workspace.value.trim();
+    button.disabled = true; submit.disabled = true; element.elements.mode.disabled = true;
+    $('project-picker-status').textContent = t('projects.pickerWaiting');
+    showError(element, null);
+    try {
+      const result = await api('/api/folders/pick', { mode, ...(initial ? { initial } : {}) });
+      if (generation !== pickerGeneration || !dialog('project').open) return;
+      if (result.cancelled) { $('project-picker-status').textContent = t('projects.pickerCancelled'); return; }
+      if (!dialog('project').open) return;
+      if (mode === 'existing') { workspace.value = result.path; pickedParent = null; }
+      else {
+        pickedParent = result.path;
+        const name = element.elements.folder_name;
+        if (!name.value) name.value = element.elements.name.value.trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '') || 'mi-app';
+        syncPickedPath();
+      }
+      syncProjectMode();
+      $('project-picker-status').textContent = t('projects.pickerSelected');
+    } catch (error) { if (generation === pickerGeneration && dialog('project').open) { showError(element, error); $('project-picker-status').textContent = ''; } }
+    finally { if (generation === pickerGeneration) { button.disabled = false; submit.disabled = false; element.elements.mode.disabled = false; } }
+  });
+  function syncPickedPath() {
+    if (!pickedParent) return;
+    const name = form('project').elements.folder_name.value.trim();
+    form('project').elements.workspace.value = pickedParent.replace(/\/$/, '') + '/' + name;
+  }
+  $('project-folder-name').addEventListener('input', syncPickedPath);
+  $('project-mode').addEventListener('change', () => { pickedParent = null; syncProjectMode(); });
+  wire('project', async element => {
+    const name = element.elements.name.value.trim();
+    const workspace = element.elements.workspace.value.trim();
+    if (!name || !workspace) throw problem('projects.required');
+    if (pickedParent && element.elements.mode.value === 'new' && (!element.elements.folder_name.value.trim() || /[\/\\]/.test(element.elements.folder_name.value) || ['.', '..'].includes(element.elements.folder_name.value.trim()))) throw problem('projects.badFolderName');
+    const result = await api('/api/projects', { name, workspace, mode: element.elements.mode.value,
+      init_git: element.elements.mode.value === 'new' && element.elements.init_git.checked });
+    state.pendingProject = result.id;
+  });
+  $('manage-project').addEventListener('click', async () => {
+    managedProject = state.project;
+    open('project-manage');
+    const element = form('project-manage');
+    element.querySelector('[type=submit]').disabled = true;
+    $('manage-project-folder').textContent = '';
+    $('manage-project-action').replaceChildren();
+    $('manage-project-action').disabled = true;
+    $('manage-project-confirm').hidden = true;
+    try {
+      const project = await api(`/api/projects/${managedProject}/settings`);
+      element.elements.name.value = project.name;
+      $('manage-project-folder').textContent = project.workspace;
+      const values = ['rename', project.archived ? 'restore' : 'archive', 'delete'];
+      element.elements.action.replaceChildren(...values.map(value => { const option = node('option', t(`projects.${value}`)); option.value = value; return option; }));
+      syncProjectAction();
+      $('manage-project-action').disabled = false;
+      element.querySelector('[type=submit]').disabled = false;
+    } catch (error) { showError(element, error); }
+  });
+  function syncProjectAction() {
+    const action = form('project-manage').elements.action.value;
+    $('manage-project-help').textContent = t(`projects.${action}Help`);
+    $('manage-project-confirm').hidden = action !== 'delete';
+    const submit = form('project-manage').querySelector('[type=submit]');
+    submit.className = action === 'delete' ? 'danger' : 'primary';
+    submit.textContent = t(action === 'delete' ? 'projects.delete' : 'projects.save');
+    $('manage-project-name').readOnly = action !== 'rename';
+  }
+  $('manage-project-action').addEventListener('change', syncProjectAction);
+  wire('project-manage', async element => {
+    const action = element.elements.action.value;
+    const body = { action };
+    if (action === 'rename') {
+      body.name = element.elements.name.value.trim();
+      if (!body.name) throw problem('projects.required');
+    }
+    if (action === 'delete') {
+      if (!element.elements.confirm.checked) throw problem('projects.needDeleteConfirm');
+      body.confirm = true;
+    }
+    await api(`/api/projects/${managedProject}/manage`, body);
+  });
+
+  let accessProject = null;
+  let sshHosts = [];
+  let accessReady = false;
+  let sshInventory = { hosts: [], keys: [], warnings: [] };
+  let agentProfiles = {};
+  $('project-access-settings').addEventListener('click', async () => {
+    accessProject = managedProject;
+    dialog('project-manage').close();
+    open('access'); accessReady = false; sshHosts = []; agentProfiles = {}; renderAccessProfiles();
+    const element = form('access');
+    element.querySelector('[type=submit]').disabled = true;
+    $('access-resources').disabled = true;
+    $('access-mcp-list').replaceChildren(); renderSshHosts();
+    try {
+      const data = await api(`/api/projects/${accessProject}/access`);
+      element.elements.enabled.checked = data.policy.enabled;
+      $('access-per-agent').checked = data.policy.per_agent || !data.policy.enabled;
+      $('access-profile-fields').hidden = !$('access-per-agent').checked;
+      const selected = new Set(data.policy.mcp_servers);
+      $('access-mcp-list').replaceChildren(...data.mcp_catalog.map(entry => {
+        const label = node('label', null, 'choice');
+        const input = node('input'); input.type = 'checkbox'; input.name = 'mcp_server'; input.value = entry.name; input.checked = selected.has(entry.name);
+        const text = node('span', entry.name + (entry.available ? '' : t('access.missing')));
+        text.append(node('small', entry.source, 'access-mcp-source'));
+        label.append(input, text); return label;
+      }));
+      if (!data.mcp_catalog.length) $('access-mcp-list').append(node('p', t('access.noMcp'), 'muted'));
+      sshHosts = data.policy.ssh_hosts; agentProfiles = data.policy.agent_profiles || {};
+      renderSshHosts(); renderSshInventory(data.ssh_inventory); renderAccessProfiles(); accessReady = true;
+      $('access-resources').disabled = !data.policy.enabled;
+      element.querySelector('[type=submit]').disabled = false;
+    } catch (error) { showError(element, error); }
+  });
+  $('access-per-agent').addEventListener('change', event => { $('access-profile-fields').hidden = !event.target.checked; });
+  $('access-enabled').addEventListener('change', event => { $('access-resources').disabled = !accessReady || !event.target.checked; });
+  function renderSshHosts() {
+    $('access-ssh-list').replaceChildren(...sshHosts.map((host, index) => {
+      const li = node('li', null, 'access-host');
+      const text = node('div'); text.append(node('strong', host.name), node('p', `${host.user}@${host.host}:${host.port}`), node('small', host.identity_file));
+      const remove = node('button', t('access.removeHost')); remove.type = 'button';
+      remove.addEventListener('click', () => { sshHosts.splice(index, 1); renderSshHosts(); renderAccessProfiles(); });
+      li.append(text, remove); return li;
+    }));
+  }
+  $('access-add-host').addEventListener('click', () => {
+    const host = { name: $('access-host-name').value.trim(), host: $('access-host-address').value.trim(), user: $('access-host-user').value.trim(),
+      port: Number($('access-host-port').value || 22), identity_file: $('access-host-key').value.trim() };
+    if (!host.name || !host.host || !host.user || !host.identity_file || sshHosts.some(entry => entry.name === host.name)) { showError(form('access'), problem('access.invalidHost')); return; }
+    sshHosts.push(host); renderSshHosts(); renderAccessProfiles(); showError(form('access'), null);
+    ['access-host-name', 'access-host-address', 'access-host-user', 'access-host-key'].forEach(id => { $(id).value = ''; });
+    $('access-host-port').value = '22';
+  });
+  function renderSshInventory(inventory) {
+    sshInventory = inventory || { hosts: [], keys: [], warnings: [] };
+    $('access-ssh-summary').textContent = t('access.inventorySummary', { hosts: sshInventory.hosts.length, keys: sshInventory.keys.length });
+    $('access-ssh-warnings').replaceChildren(...sshInventory.warnings.map(warning => node('p', warning)));
+    $('access-known-groups').replaceChildren(...(sshInventory.groups || []).map(group => { const option = node('option'); option.value = group.name; return option; }));
+    renderInventoryMatches();
+  }
+  function renderInventoryMatches() {
+    const selected = $('access-import-host').value;
+    const query = $('access-ssh-search').value.trim().toLocaleLowerCase();
+    const matches = value => !query || value.toLocaleLowerCase().includes(query);
+    const hosts = sshInventory.hosts.filter(host => matches([host.name, host.group, host.user, host.host, t(`access.env.${host.environment || 'unknown'}`), ...host.identity_files.map(key => key.path)].join(' ')));
+    const groups = new Map();
+    for (const host of hosts) {
+      const group = host.group || t('access.env.unknown');
+      if (!groups.has(group)) { const optgroup = node('optgroup'); optgroup.label = group; groups.set(group, optgroup); }
+      const option = node('option', `${host.name} · ${host.user}@${host.host}:${host.port} · ${t(`access.env.${host.environment || 'unknown'}`)}`);
+      option.value = host.name; groups.get(group).append(option);
+    }
+    $('access-import-host').replaceChildren(...groups.values());
+    if (hosts.some(host => host.name === selected)) $('access-import-host').value = selected;
+    $('access-key-inventory').replaceChildren(...sshInventory.keys.filter(key => matches([key.path, key.group, ...key.hosts].join(' '))).map(key => {
+      const li = node('li'); li.append(node('strong', key.group || t('access.env.unknown')), node('span', key.path), node('small', key.hosts.length ? key.hosts.join(', ') : t(key.referenced ? 'access.patternKey' : 'access.unreferencedKey')));
+      if (key.shared) li.append(node('small', t('access.sharedKey')));
+      if (!key.exists) li.append(node('small', t('access.missingKey'))); return li;
+    }));
+    syncImportedHost();
+  }
+  $('access-ssh-search').addEventListener('input', renderInventoryMatches);
+  function syncImportedHost() {
+    const host = sshInventory.hosts.find(entry => entry.name === $('access-import-host').value);
+    $('access-import-key').replaceChildren(...(host?.identity_files || []).map(key => { const option = node('option', key.path + (key.exists ? '' : t('access.missingKey'))); option.value = key.path; option.disabled = !key.exists; return option; }));
+    const first = host?.identity_files.find(key => key.exists); if (first) $('access-import-key').value = first.path;
+    $('access-import-detail').textContent = host ? [host.group, t(`access.env.${host.environment || 'unknown'}`), ...(host.root_account ? [t('access.rootAccount')] : []), host.source, ...host.reasons].filter(Boolean).join(' · ') : t(sshInventory.hosts.length ? 'access.noMatches' : 'access.noSshConfig');
+    $('access-import-ssh').disabled = !host?.eligible || !first;
+    $('access-host-group').value = host?.group || '';
+    $('access-host-environment').value = host?.environment || 'unknown';
+    $('access-save-organization').disabled = !host;
+    $('access-organization-status').textContent = '';
+  }
+  $('access-import-host').addEventListener('change', syncImportedHost);
+  $('access-save-organization').addEventListener('click', async () => {
+    const button = $('access-save-organization'); button.disabled = true;
+    try {
+      renderSshInventory(await api('/api/ssh/organization', { alias: $('access-import-host').value, group: $('access-host-group').value.trim(), environment: $('access-host-environment').value }));
+      $('access-organization-status').textContent = t('access.organizationSaved'); showError(form('access'), null);
+    } catch (error) { showError(form('access'), error); }
+    finally { button.disabled = !$('access-import-host').value; }
+  });
+  $('access-refresh-ssh').addEventListener('click', async () => {
+    $('access-refresh-ssh').disabled = true;
+    try { renderSshInventory((await api(`/api/projects/${accessProject}/access`)).ssh_inventory); }
+    catch (error) { showError(form('access'), error); }
+    finally { $('access-refresh-ssh').disabled = false; }
+  });
+  $('access-import-ssh').addEventListener('click', () => {
+    const host = sshInventory.hosts.find(entry => entry.name === $('access-import-host').value);
+    if (!host?.eligible) return;
+    for (const [id, value] of [['access-host-name', host.name], ['access-host-address', host.host], ['access-host-user', host.user], ['access-host-port', host.port], ['access-host-key', $('access-import-key').value]]) $(id).value = value;
+    $('access-host-name').focus();
+  });
+  const projectMcpSelection = () => [...form('access').querySelectorAll('[name=mcp_server]:checked')].map(input => input.value);
+  function renderAccessProfiles() {
+    const mcps = projectMcpSelection(); const hosts = sshHosts.map(host => host.name);
+    // Removing a project resource also removes that grant from every profile; never widen access.
+    for (const grant of Object.values(agentProfiles)) { grant.mcp_servers = grant.mcp_servers.filter(name => mcps.includes(name)); grant.ssh_hosts = grant.ssh_hosts.filter(name => hosts.includes(name)); }
+    $('access-profile-list').replaceChildren(...Object.entries(agentProfiles).map(([name, grant]) => {
+      const li = node('li', null, 'access-host'); const text = node('div'); text.append(node('strong', name), node('small', `MCP: ${grant.mcp_servers.join(', ') || '—'} · SSH: ${grant.ssh_hosts.join(', ') || '—'}`));
+      const remove = node('button', t('access.removeHost')); remove.type = 'button'; remove.addEventListener('click', () => { delete agentProfiles[name]; renderAccessProfiles(); }); li.append(text, remove); return li;
+    }));
+    for (const [id, values, group] of [['access-profile-mcp', mcps, 'profile_mcp'], ['access-profile-ssh', hosts, 'profile_ssh']]) {
+      const selected = new Set([...$(id).querySelectorAll('input:checked')].map(input => input.value));
+      $(id).replaceChildren(...values.map(value => { const label = node('label', null, 'choice'); const input = node('input'); input.type = 'checkbox'; input.name = group; input.value = value; input.checked = selected.has(value); label.append(input, node('span', value)); return label; }));
+    }
+  }
+  $('access-mcp-list').addEventListener('change', renderAccessProfiles);
+  $('access-add-profile').addEventListener('click', () => {
+    const name = $('access-profile-name').value.trim();
+    if (!/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(name) || Object.hasOwn(agentProfiles, name)) { showError(form('access'), problem('access.invalidProfile')); return; }
+    agentProfiles[name] = { mcp_servers: [...$('access-profile-mcp').querySelectorAll('input:checked')].map(input => input.value), ssh_hosts: [...$('access-profile-ssh').querySelectorAll('input:checked')].map(input => input.value) };
+    $('access-profile-name').value = ''; for (const input of form('access').querySelectorAll('[name=profile_mcp], [name=profile_ssh]')) input.checked = false;
+    renderAccessProfiles(); showError(form('access'), null);
+  });
+  function fillAccessProfile(prefix, policy, selected = '') {
+    const profiles = Object.keys(policy?.agent_profiles || {}); const select = $(`${prefix}-access-profile`);
+    $(`${prefix}-access-group`).hidden = !policy?.enabled;
+    const empty = node('option', t(policy?.per_agent ? 'access.noProfile' : 'access.projectDefault')); empty.value = '';
+    select.replaceChildren(empty, ...profiles.map(name => { const option = node('option', name); option.value = name; return option; }));
+    select.value = profiles.includes(selected) ? selected : '';
+    $(`${prefix}-access-help`).textContent = t(policy?.per_agent ? 'access.chooseProfileHelp' : 'access.defaultProfileHelp');
+  }
+
+  wire('access', async element => {
+    if (!accessReady) throw problem('access.loading');
+    if (element.elements.enabled.checked && ['access-host-name', 'access-host-address', 'access-host-user', 'access-host-key'].some(id => $(id).value.trim())) throw problem('access.unsavedHost');
+    const enabled = element.elements.enabled.checked;
+    if (enabled && $('access-per-agent').checked && $('access-profile-name').value.trim()) throw problem('access.unsavedProfile');
+    await api(`/api/projects/${accessProject}/access`, { enabled,
+      mcp_servers: enabled ? [...element.querySelectorAll('[name=mcp_server]:checked')].map(input => input.value) : [], ssh_hosts: enabled ? sshHosts : [], per_agent: enabled && $('access-per-agent').checked, agent_profiles: enabled && $('access-per-agent').checked ? agentProfiles : {} });
+  });
+
   // ---------- Job actions ----------
   function renderJobActions(job) {
+    const access = job?.access;
+    $('agent-access-info').hidden = !access;
+    $('agent-access-info').textContent = access ? t('access.applied', { profile: access.profile || t(access.per_agent ? 'access.noProfile' : 'access.projectDefault'), mcp: access.mcp_servers.join(', ') || '—', ssh: access.ssh_hosts.join(', ') || '—' }) : '';
     const bar = $('actions');
     const items = [];
+    if (job?.has_flow) items.push({ key: 'proposal', label: t('flow.review'), className: 'primary' });
     if (job?.active) items.push({ key: 'cancel', label: t('actions.cancel'), className: 'danger' });
     if (job && REVIEWABLE.has(job.state)) items.push({ key: 'review', label: t('actions.review'), className: 'primary' });
     if (job?.plan_id && job.checklist_item && (FAILURE.has(job.state) || RETRYABLE.has(job.state))) items.push({ key: 'retry', label: t('actions.retry'), className: '' });
     bar.hidden = items.length === 0;
     reconcile(bar, items, item => item.key, item => {
       const button = node('button'); button.type = 'button';
-      button.addEventListener('click', () => ({ cancel: openCancel, review: openReview, retry: openRetry })[item.key]());
+      button.addEventListener('click', () => ({ cancel: openCancel, review: openReview, retry: openRetry, proposal: openProposal })[item.key]());
       return button;
     }, (button, item) => { button.textContent = item.label; button.className = item.className; });
   }
@@ -93,7 +350,7 @@ window.AOActions = ctx => {
     const counts = plan.counts || {}; const total = Object.values(counts).reduce((sum, value) => sum + value, 0);
     return { done: counts.done || 0, total };
   }
-  function renderProjectActions(project) { $('new-plan').hidden = !project; }
+  function renderProjectActions(project) { $('new-plan').hidden = !project || project.archived; $('new-flow').hidden = !project || project.archived; $('manage-project').hidden = !project; }
   function renderPlansList(project) {
     const section = $('plans-list');
     const plans = project?.plans || [];
@@ -126,7 +383,7 @@ window.AOActions = ctx => {
     section.querySelector('.plan-goal').textContent = plan.goal.objective || '';
     const meta = section.querySelector('.plan-meta'); meta.replaceChildren();
     const limit = plan.executor_policy.max_attempts_per_item;
-    for (const [label, value] of [[t('plan.fieldStrategy'), plan.goal.strategy], [t('plan.fieldRisk'), plan.goal.risk], [t('plan.fieldType'), plan.goal.task_type],
+    for (const [label, value] of [[t('flow.coordinator'), plan.coordinator?.executor || 'Codex'], [t('plan.fieldStrategy'), plan.goal.strategy], [t('plan.fieldRisk'), plan.goal.risk], [t('plan.fieldType'), plan.goal.task_type],
       [t('plan.fieldTopology'), plan.team_policy?.topology], [t('plan.fieldParallel'), plan.team_policy?.max_parallel], [t('plan.attemptLimit'), limit ?? '—']]) meta.append(node('dt', label), node('dd', st('plan', value ?? '')));
     const allowed = section.querySelector('.plan-executors'); allowed.replaceChildren();
     if (!plan.executor_policy.allowed.length) allowed.append(node('li', t('plan.noExecutors'), 'muted'));
@@ -135,12 +392,14 @@ window.AOActions = ctx => {
       const li = node('li', null, 'plan-item');
       const head = node('div', null, 'plan-item-head'); head.append(dot('neutral'), node('strong'), node('small'));
       const launch = node('button', t('plan.launch'), 'primary'); launch.type = 'button'; launch.addEventListener('click', () => openLaunch(plan.plan_id, li.dataset.key));
-      li.append(head, node('div', null, 'plan-jobs'), launch); return li;
+      li.append(head, node('p', null, 'plan-assignment muted'), node('div', null, 'plan-jobs'), launch); return li;
     }, (li, item) => {
       li.querySelector('.dot').className = `dot ${item.state === 'done' ? 'green' : item.state === 'blocked' ? 'red' : item.state === 'in_progress' ? 'blue' : 'neutral'}`;
       li.querySelector('strong').textContent = item.title;
       li.querySelector('small').textContent = `${st('plan', item.state)} · ${tn('plan.attempts', item.attempts)}`;
       li.querySelector('.primary').hidden = !item.can_launch;
+      li.querySelector('.plan-assignment').textContent = item.assigned_executor || '';
+      li.querySelector('.plan-assignment').hidden = !item.assigned_executor;
       li._item = item;
       reconcile(li.querySelector('.plan-jobs'), item.job_ids, id => id, id => {
         const button = node('button', id, 'job-chip'); button.type = 'button'; button.addEventListener('click', () => ctx.selectAgent(button.dataset.key)); return button;
@@ -158,6 +417,7 @@ window.AOActions = ctx => {
     select.replaceChildren(...values.map(value => { const option = node('option', st('plan', value)); option.value = value; option.selected = value === selected; return option; }));
   }
   async function openPlan() {
+    flowProject = state.project;
     open('plan');
     const element = form('plan');
     const data = await loadCatalog(element);
@@ -183,7 +443,7 @@ window.AOActions = ctx => {
     const body = { title: value('title'), goal: value('goal'), checklist, strategy: value('strategy'), risk: value('risk'), task_type: value('task_type'),
       topology: value('topology'), max_parallel: Number(value('max_parallel') || 3), executors: lines(value('executors')), expensive_executors: lines(value('expensive_executors')) };
     for (const name of ['decisions', 'constraints', 'validation', 'completion']) if (value(name)) body[name] = value(name);
-    const plan = await api(projectPath('/plans'), body);
+    const plan = await api(`/api/projects/${flowProject}/plans`, body);
     state.pendingPlan = plan.plan_id;
   });
 
@@ -205,9 +465,10 @@ window.AOActions = ctx => {
   }
   async function prepareLaunch(element, planId, itemId, template) {
     const plan = await api(projectPath(`/plans/${planId}`));
+    fillAccessProfile('launch', plan.access_policy, template?.access_profile || '');
     const item = plan.items.find(entry => entry.id === itemId);
     if (!item) throw problem('launch.noItem');
-    launching = { planId, itemId, item };
+    launching = { planId, itemId, item, project: state.project };
     // A finished item or one at its attempt limit cannot be launched; say so instead of letting the
     // engine reject a form the person already filled in.
     if (!item.can_launch) { element.querySelector('button[type=submit]').disabled = true; throw problem('launch.blocked'); }
@@ -218,7 +479,7 @@ window.AOActions = ctx => {
     select.replaceChildren(...item.allowed.map((entry, index) => {
       const option = node('option', `${entry.display}${untried.has(entry.display) ? t('launch.untried') : t('launch.tried')}`); option.value = String(index); return option;
     }));
-    const wanted = template ? item.allowed.findIndex(entry => untried.has(entry.display)) : -1;
+    const wanted = template ? item.allowed.findIndex(entry => untried.has(entry.display)) : item.allowed.findIndex(entry => entry.display === item.assigned_executor);
     const same = template ? item.allowed.findIndex(entry => entry.cli === template.cli && (entry.model || null) === (template.model || null)) : -1;
     select.value = String(Math.max(0, wanted >= 0 ? wanted : same));
     const sync = () => {
@@ -227,8 +488,8 @@ window.AOActions = ctx => {
       $('launch-executor-help').textContent = item.allowed.length ? '' : t('launch.noExecutors');
     };
     select.onchange = sync; sync();
-    element.elements.task.value = template?.task || buildTemplate(item.title);
-    element.elements.role.value = template?.role || '';
+    element.elements.task.value = template?.task || item.task || buildTemplate(item.title);
+    element.elements.role.value = template?.role || (item.task ? item.title : '');
     element.elements.max_cost_usd.value = template?.max_cost_usd ?? '';
     element.elements.timeout_seconds.value = template?.timeout_seconds || 3600;
     element.elements.allow_paths.value = (template?.scope.allowed_paths || []).join('\n');
@@ -244,12 +505,77 @@ window.AOActions = ctx => {
     const body = { cli: entry.cli, task, confirm: true, timeout_seconds: Number(element.elements.timeout_seconds.value) || 3600,
       allow_paths: lines(element.elements.allow_paths.value), deny_paths: lines(element.elements.deny_paths.value) };
     if (entry.model) body.model = entry.model;
+    if (element.elements.access_profile.value) body.access_profile = element.elements.access_profile.value;
     if (element.elements.role.value.trim()) body.role = element.elements.role.value.trim();
     if (element.elements.max_cost_usd.value) body.max_cost_usd = Number(element.elements.max_cost_usd.value);
     if (element.elements.allow_dirty.checked) body.allow_dirty = true;
     if (element.elements.allow_concurrent_workspace.checked) body.allow_concurrent_workspace = true;
-    const job = await api(projectPath(`/plans/${launching.planId}/items/${launching.itemId}/launch`), body);
+    const job = await api(`/api/projects/${launching.project}/plans/${launching.planId}/items/${launching.itemId}/launch`, body);
     state.pendingJob = job.job_id;
+  });
+
+  // A browser-created flow starts a bounded planning job, then imports its reviewed proposal.
+  $('new-flow').addEventListener('click', async () => {
+    flowProject = state.project;
+    open('flow');
+    const element = form('flow');
+    const data = await loadCatalog(element);
+    if (!data) return;
+    const access = await api(`/api/projects/${flowProject}/access`);
+    fillAccessProfile('flow', access.policy);
+    const strict = ctx.selectedProject()?.access_restricted;
+    const installed = data.harnesses.filter(entry => entry.available && (!strict || ['claude-code', 'claude'].includes(entry.cli)));
+    const select = $('flow-cli');
+    select.replaceChildren(...installed.map(entry => { const option = node('option', entry.display_name || entry.cli); option.value = entry.cli; return option; }));
+    const updateModels = () => {
+      const models = installed.find(entry => entry.cli === select.value)?.configured_models || [];
+      $('flow-model').value = '';
+      $('flow-models').replaceChildren(...models.filter(value => typeof value === 'string').map(value => { const option = node('option'); option.value = value; return option; }));
+    };
+    select.onchange = updateModels; updateModels();
+    fillSelect(element.elements.strategy, data.options.strategies, 'cost-first');
+    fillSelect(element.elements.risk, data.options.risks, 'medium');
+    if (!installed.length) { element.querySelector('[type=submit]').disabled = true; showError(element, problem('flow.noHarness')); }
+  });
+  wire('flow', async element => {
+    const value = name => element.elements[name].value.trim();
+    for (const name of ['title', 'goal']) if (!value(name)) throw problem('err.required', { field: fieldLabel(name) });
+    if (!value('cli')) throw problem('flow.noHarness');
+    if (!value('model') && value('cli') !== 'deepseek-harness') throw problem('flow.noModel');
+    if (!element.elements.confirm.checked) throw problem('flow.needConfirm');
+    const result = await api(`/api/projects/${flowProject}/flows`, { title: value('title'), goal: value('goal'),
+      coordinator: value('cli') + (value('model') ? '=' + value('model') : ''), ...(value('access_profile') ? { access_profile: value('access_profile') } : {}), tasks: lines(value('tasks')),
+      executors: lines(value('executors')), expensive_executors: lines(value('expensive_executors')), strategy: value('strategy'), risk: value('risk'), confirm: true, allow_dirty: element.elements.allow_dirty.checked });
+    state.pendingJob = result.job_id;
+  });
+  async function openProposal() {
+    proposing = { project: state.project, job: state.agent };
+    open('proposal');
+    const element = form('proposal');
+    $('proposal-tasks').replaceChildren();
+    element.querySelector('[type=submit]').disabled = true;
+    try {
+      const proposal = await api(`/api/projects/${proposing.project}/jobs/${proposing.job}/flow`);
+      if (proposal.plan_id) { dialog('proposal').close(); ctx.selectPlan(proposal.plan_id); return; }
+      if (proposal.error) throw new FormError(proposal.error);
+      if (!proposal.tasks.length) throw problem('flow.waiting');
+      proposal.tasks.forEach((task, index) => {
+        const section = node('section', null, 'proposal-task');
+        section.append(node('small', String(index + 1).padStart(2, '0'), 'eyebrow'), node('h3', task.title), node('p', task.objective));
+        const dl = node('dl');
+        for (const key of ['scope', 'acceptance', 'validation']) dl.append(node('dt', t(`flow.${key}`)), node('dd', task[key]));
+        const label = node('label', t('flow.assignment')); label.htmlFor = `assignment-${index}`;
+        const select = node('select'); select.id = label.htmlFor; select.name = 'assignment';
+        select.replaceChildren(...proposal.pool.map(value => { const option = node('option', value); option.value = value; option.selected = value === task.executor; return option; }));
+        section.append(dl, label, select); $('proposal-tasks').append(section);
+      });
+      element.querySelector('[type=submit]').disabled = false;
+    } catch (error) { showError(element, error); }
+  }
+  wire('proposal', async element => {
+    const result = await api(`/api/projects/${proposing.project}/jobs/${proposing.job}/flow/accept`, {
+      confirm: true, assignments: [...element.querySelectorAll('[name=assignment]')].map(select => select.value) });
+    state.pendingPlan = result.plan_id;
   });
 
   for (const closer of document.querySelectorAll('dialog [data-close]')) closer.addEventListener('click', () => closer.closest('dialog').close());

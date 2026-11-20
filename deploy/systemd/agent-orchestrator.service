@@ -1,0 +1,17 @@
+[Unit]
+Description=Agent Orchestrator local dashboard
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Proyectos/agent-orchestrator
+ExecStart=/usr/bin/python3 %h/Proyectos/agent-orchestrator/plugins/agent-orchestrator/scripts/dashboard_service.py --port 44509
+Environment=PATH=%h/.local/bin:%h/.bun/bin:%h/.grok/bin:%h/go/bin:%h/.dotnet/tools:%h/.opencode/bin:%h/.npm-global/bin:/usr/local/bin:/usr/bin
+UMask=0077
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=10
+# Workers have independent durable lifecycles; stopping the panel must leave them running.
+KillMode=process
+
+[Install]
+WantedBy=default.target

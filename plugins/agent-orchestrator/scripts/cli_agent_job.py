@@ -23,6 +23,8 @@ import webbrowser
 from pathlib import Path
 from typing import Any
 
+import project_access
+
 
 MAX_TASK_BYTES = 1_000_000
 QUALITY_FIRST_CONTEXT_BYTES = 65_536
@@ -1407,6 +1409,7 @@ def automatic_executor_policy(
     risk: str,
     profiles: dict[str, dict[str, Any]],
     task_type: str = "general",
+    *, restricted: bool = False,
 ) -> dict[str, Any]:
     """Resolve a bounded executor pool from explicit orchestration intent and installed CLIs."""
     if strategy not in STRATEGIES:
@@ -1421,7 +1424,12 @@ def automatic_executor_policy(
         "maximum-quality": "user_requested_maximum_or_frontier_quality",
     }[strategy]
     candidates: list[dict[str, Any]] = []
-    for candidate in AUTO_EXECUTOR_CANDIDATES[strategy]:
+    routing_candidates = AUTO_EXECUTOR_CANDIDATES[strategy]
+    if restricted and strategy == "cost-first":
+        routing_candidates = [{"cli": "claude-code", "model": "sonnet", "effort": {"low": "medium", "medium": "high", "high": "high"}}]
+    for candidate in routing_candidates:
+        if restricted and candidate["cli"] not in project_access.SUPPORTED:
+            continue
         profile = profiles.get(candidate["cli"])
         if not profile or not resolve_profile_executable(profile)[1]:
             continue
@@ -1885,8 +1893,10 @@ def command_create_plan(args: argparse.Namespace) -> int:
         policy = automatic_executor_policy(
             args.strategy,
             args.risk,
-            load_profiles(config_path(args.config)),
+            {name: profile for name, profile in load_profiles(config_path(args.config)).items()
+             if not project_access.policy_for(workspace, state_home()).get("enabled") or name in project_access.SUPPORTED},
             args.task_type,
+            restricted=bool(project_access.policy_for(workspace, state_home()).get("enabled")),
         )
     preferences = load_preferences()
     plan = {
@@ -3022,6 +3032,15 @@ def command_launch(args: argparse.Namespace) -> int:
             + ". Use validate-task or pass --allow-unstructured-task for intentional legacy packets."
         )
     profiles = load_profiles(config_path(args.config))
+    try:
+        access_policy = project_access.policy_for(workspace, state_home())
+        agent_access = project_access.for_agent(access_policy, args.access_profile)
+        if access_policy.get("enabled"):
+            project_access.require_supported(args.cli, profiles.get(args.cli), validate_profile(args.cli, BUILTIN_PROFILES[args.cli]) if args.cli in BUILTIN_PROFILES else {})
+            if args.cli_agent:
+                raise project_access.AccessError("El modo restringido no admite personas/agentes internos personalizados.")
+    except (project_access.AccessError, ValueError, OSError) as exc:
+        raise RunnerError(f"Project access policy: {exc}") from exc
     if args.cli not in profiles:
         raise RunnerError(f"Unknown CLI profile: {args.cli}")
     profile = profiles[args.cli]
@@ -3100,8 +3119,9 @@ def command_launch(args: argparse.Namespace) -> int:
     os.chmod(original_task, 0o600)
     channel_path = write_channel_wrapper(path, selected_job_id)
     task_copy = path / "task.md"
+    access_snapshot = project_access.prepare(agent_access, path, state_home(), write_json) if access_policy.get("enabled") else None
     task_copy.write_text(
-        coordination_preamble(channel_path) + original_task.read_text(encoding="utf-8"),
+        (project_access.preamble() if access_snapshot else coordination_preamble(channel_path)) + original_task.read_text(encoding="utf-8"),
         encoding="utf-8",
     )
     os.chmod(task_copy, 0o600)
@@ -3117,6 +3137,8 @@ def command_launch(args: argparse.Namespace) -> int:
         args.reasoning_effort,
         channel_path.parent,
     )
+    if access_snapshot:
+        command = project_access.apply_command(command, path)
     redacted_command = [
         "<prompt_text>" if token == task_copy.read_text(encoding="utf-8") else token
         for token in command
@@ -3134,6 +3156,9 @@ def command_launch(args: argparse.Namespace) -> int:
         "role": args.role,
         "depends_on": args.depends_on,
         "profile": profile,
+        "access": access_snapshot,
+        "access_profile": args.access_profile,
+        "access_policy_digest": hashlib.sha256(json.dumps(access_policy, sort_keys=True).encode()).hexdigest(),
         "prompt_transport": transport,
         "model": args.model,
         "route": args.route,
@@ -3264,11 +3289,26 @@ def command_worker(args: argparse.Namespace) -> int:
         extra_env = build_environment(
             profile, workspace, prompt_file, channel_dir(path)
         )
+        current_access = project_access.policy_for(workspace, state_home())
+        if current_access.get("enabled") or meta.get("access"):
+            try:
+                if hashlib.sha256(json.dumps(current_access, sort_keys=True).encode()).hexdigest() != meta.get("access_policy_digest"):
+                    raise project_access.AccessError("Project access changed before the worker started; launch it again.")
+                project_access.require_supported(meta["agent"], profile, validate_profile(meta["agent"], BUILTIN_PROFILES.get(meta["agent"], {})))
+                effective_access = project_access.for_agent(current_access, meta.get("access_profile"))
+                expected_access = project_access.prepare(effective_access, path, state_home(), write_json)
+                if expected_access != meta.get("access"):
+                    raise project_access.AccessError("Recorded access does not match this agent profile; launch it again.")
+            except project_access.AccessError as exc:
+                raise RunnerError(str(exc)) from exc
+            command = project_access.apply_command(command, path)
         if extra_env:
             for value in extra_env.values():
                 candidate = Path(value)
                 if candidate.is_absolute() and path.resolve() in candidate.resolve().parents:
                     candidate.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if meta.get("access"):
+            extra_env = project_access.restricted_environment(extra_env)
         with stdout_path.open("wb") as stdout_handle, stderr_path.open(
             "wb"
         ) as stderr_handle:
@@ -4156,6 +4196,7 @@ def build_parser() -> argparse.ArgumentParser:
     launch = subparsers.add_parser("launch", help="Launch a detached agent job")
     launch.add_argument("--cli", "--agent", dest="cli")
     launch.add_argument("--route", choices=tuple(sorted(BUILTIN_ROUTES)))
+    launch.add_argument("--access-profile", help="Project access profile for this worker; cannot widen project grants")
     launch.add_argument("--coordinator-model")
     launch.add_argument("--workspace", default=os.getcwd())
     launch.add_argument("--task-file", required=True)
