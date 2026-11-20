@@ -616,14 +616,23 @@ class DashboardState:
             return panel_actions.plan_view(panel_actions.edit_plan(parts[4], body))
         if len(parts) == 6 and parts[3] == 'plans' and parts[5] == 'supervision':
             _, plan = self.verified_plan(parts[2], parts[4])
-            panel_actions.only_fields(body, ('enabled', 'confirm'), ('auto_repair', 'reviewer', 'access_profile'))
+            panel_actions.only_fields(body, ('enabled', 'confirm'), ('auto_repair', 'auto_advance', 'reviewer', 'access_profile'))
             if body.get('confirm') is not True:
                 raise panel_actions.invalid('confirm')
             reviewer = panel_actions.text(body, 'reviewer', required=False, limit=200, single_line=True)
             if reviewer and not panel_actions.EXECUTOR_RE.fullmatch(reviewer):
                 raise panel_actions.invalid('reviewer')
             profile = panel_actions.text(body, 'access_profile', required=False, limit=64, single_line=True)
-            return supervision.configure(plan, panel_actions.flag(body, 'enabled'), panel_actions.flag(body, 'auto_repair'), reviewer, profile)
+            auto_advance = panel_actions.flag(body, 'auto_advance') if 'auto_advance' in body else False
+            return supervision.configure(plan, panel_actions.flag(body, 'enabled'), panel_actions.flag(body, 'auto_repair'), reviewer, profile, auto_advance)
+        if len(parts) == 6 and parts[3] == 'plans' and parts[5] == 'auto-run':
+            _, plan = self.verified_plan(parts[2], parts[4])
+            panel_actions.only_fields(body, ('confirm',))
+            if body.get('confirm') is not True:
+                raise panel_actions.invalid('confirm')
+            supervision.configure(plan, enabled=True, auto_repair=True, auto_advance=True)
+            supervision.tick(plan['plan_id'])
+            return panel_actions.plan_view(plan)
         registry_path = project_registry_path()
         registry_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         with jobs.record_lock(registry_path):

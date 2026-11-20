@@ -25,8 +25,8 @@ def read_state(plan_id):
     return jobs.read_json(path) if path.exists() else {'enabled': False, 'operations': {}}
 
 
-def configure(plan, enabled, auto_repair=False, reviewer=None, access_profile=None):
-    if not isinstance(enabled, bool) or not isinstance(auto_repair, bool):
+def configure(plan, enabled, auto_repair=False, reviewer=None, access_profile=None, auto_advance=False):
+    if not isinstance(enabled, bool) or not isinstance(auto_repair, bool) or not isinstance(auto_advance, bool):
         raise jobs.RunnerError('Las opciones de supervisión deben ser booleanas.')
     path = state_path(plan['plan_id'])
     with jobs.record_lock(path):
@@ -36,7 +36,7 @@ def configure(plan, enabled, auto_repair=False, reviewer=None, access_profile=No
             raise jobs.RunnerError('Selecciona un CLI y modelo para la supervisión.')
         if enabled:
             jobs.parse_executor_spec(coordinator['executor'], expensive_approved=True)
-        state.update(enabled=enabled, auto_repair=auto_repair, coordinator=coordinator, updated_at=jobs.utc_now())
+        state.update(enabled=enabled, auto_repair=auto_repair, auto_advance=auto_advance, coordinator=coordinator, updated_at=jobs.utc_now())
         state.pop('error', None)
         state.setdefault('operations', {})
         jobs.write_json(path, state)
@@ -45,8 +45,9 @@ def configure(plan, enabled, auto_repair=False, reviewer=None, access_profile=No
 
 def public_state(plan_id):
     state = read_state(plan_id)
-    return {key: state.get(key) for key in ('enabled', 'auto_repair', 'coordinator', 'updated_at', 'report', 'error')} | {
-        'operations': [{key: op.get(key) for key in ('key', 'kind', 'target', 'question_id', 'job_id', 'state', 'notes', 'feedback_id', 'repair_job_id')} for op in state.get('operations', {}).values()]}
+    return {key: state.get(key) for key in ('enabled', 'auto_repair', 'auto_advance', 'coordinator', 'updated_at', 'report', 'error')} | {
+        'operations': [{key: op.get(key) for key in ('key', 'kind', 'target', 'question_id', 'job_id', 'state', 'notes', 'feedback_id', 'repair_job_id')} for op in state.get('operations', {}).values()]
+    }
 
 
 def fingerprint(workspace):
@@ -374,6 +375,9 @@ def tick(plan_id):
                         # API action rejections must become a durable escalation, never an unbounded retry loop.
                         escalate(plan, op, str(exc)[:2000], kind == 'question')
             fresh = jobs.read_plan(plan_id)[1]
+            if state.get('enabled') and state.get('auto_advance') and not fresh.get('complete'):
+                launch_eligible_pending_items(fresh, state, all_jobs)
+                fresh = jobs.read_plan(plan_id)[1]
             state['report'] = report(fresh, state)
             if fresh.get('complete') and not state.get('completion_notified'):
                 jobs.notify_user('Agent Orchestrator', 'Plan revisado y completado: ' + fresh['title'], category='complete', key='plan:' + plan_id)
@@ -381,6 +385,72 @@ def tick(plan_id):
             state.pop('error', None)
             state['updated_at'] = jobs.utc_now()
             jobs.write_json(config_path, state)
+
+
+def launch_eligible_pending_items(plan, state, all_jobs):
+    if not state.get('enabled') or not state.get('auto_advance'):
+        return
+    import panel_actions as actions
+    workspace = plan['workspace']
+    max_parallel = (plan.get('team_policy') or {}).get('max_parallel', 3)
+    active_in_plan = 0
+    for j in all_jobs:
+        if j.get('execution_state') in ACTIVE and j.get('plan_id') == plan['plan_id']:
+            active_in_plan += 1
+
+    item_map = {item['id']: item for item in plan.get('items', [])}
+    for item in plan.get('items', []):
+        if active_in_plan >= max_parallel:
+            break
+        if item.get('state') != 'pending':
+            continue
+        if item.get('job_ids'):
+            continue  # Already launched
+        if not item.get('task') or jobs.validate_task_packet(item['task']) or '<<completar>>' in item['task']:
+            continue  # Contract not ready or incomplete
+        # Check dependencies
+        deps = item.get('depends_on') or []
+        deps_met = True
+        dep_job_args = []
+        for d in deps:
+            dep_item = item_map.get(d)
+            if not dep_item or dep_item.get('state') != 'done':
+                deps_met = False
+                break
+            if dep_item.get('job_ids'):
+                dep_job_args.append(f"--depends-on={dep_item['job_ids'][-1]}")
+        if not deps_met:
+            continue
+
+        # Eligible to launch!
+        spec = item.get('assigned_executor')
+        if not spec:
+            allowed = plan.get('executor_policy', {}).get('allowed', [])
+            if allowed:
+                spec = allowed[0]['display']
+            else:
+                continue
+        selected = jobs.parse_executor_spec(spec, expensive_approved=True)
+        cli = selected['cli']
+        model = selected.get('model')
+
+        argv = ['launch', f"--cli={cli}", f"--workspace={workspace}", f"--plan-id={plan['plan_id']}",
+                f"--checklist-item={item['id']}", '--allow-dirty', '--allow-concurrent-workspace', '--json']
+        if model:
+            argv.append(f"--model={model}")
+        is_expensive = jobs.is_expensive_executor_model(model)
+        argv.append(f"{'--approved-expensive-executor' if is_expensive else '--approved-executor'}={spec}")
+        argv.extend(dep_job_args)
+
+        with actions.private_text_file(item['task'] + '\n') as task_file:
+            try:
+                res = actions.run_engine([*argv, f"--task-file={task_file}"])
+                active_in_plan += 1
+                if isinstance(res, dict) and res.get('job_id'):
+                    all_jobs.append(jobs.get_status(jobs.job_dir(res['job_id'])))
+            except Exception as exc:
+                state['error'] = f"Error al lanzar automáticamente {item['id']}: {exc}"
+                break
 
 
 class Supervisor:

@@ -508,6 +508,35 @@ window.AOActions = ctx => {
     }
     const pendingEditable = plan.items.filter(i => i.editable && !i.contract_ready);
     batchButton.hidden = pendingEditable.length === 0;
+    let autoRunButton = section.querySelector('.auto-run-button');
+    if (!autoRunButton) {
+      autoRunButton = node('button', t('plan.autoRun'), 'auto-run-button primary');
+      autoRunButton.type = 'button';
+      batchButton.after(autoRunButton);
+    }
+    const hasPendingTasks = plan.items.some(i => i.state !== 'done');
+    autoRunButton.hidden = pendingEditable.length > 0 || !hasPendingTasks;
+    const isAutoRunning = plan.supervision?.enabled && plan.supervision?.auto_advance;
+    if (isAutoRunning) {
+      autoRunButton.disabled = true;
+      autoRunButton.textContent = t('plan.autoRunning');
+    } else {
+      autoRunButton.disabled = !plan.can_edit;
+      autoRunButton.textContent = t('plan.autoRun');
+    }
+    autoRunButton.onclick = async () => {
+      if (!confirm(t('plan.autoRunConfirm'))) return;
+      autoRunButton.disabled = true;
+      autoRunButton.textContent = t('plan.autoRunning');
+      try {
+        await api(projectPath(`/plans/${plan.plan_id}/auto-run`), { confirm: true });
+        await ctx.refresh();
+      } catch (err) {
+        autoRunButton.disabled = false;
+        autoRunButton.textContent = t('plan.autoRun');
+        showError(section, err);
+      }
+    };
     const batchDraft = plan.batch_contract_draft;
     if (batchDraft?.state === 'running') {
       batchButton.disabled = true;
