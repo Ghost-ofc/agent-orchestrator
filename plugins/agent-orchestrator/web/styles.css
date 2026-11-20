@@ -493,3 +493,12 @@ dialog[open] { animation: panel-in 200ms var(--salida); }
 .access-applied { margin: 8px 0 16px; font-size: 11px; overflow-wrap: anywhere; }
 
 .access-profiles .choice span, #access-mcp-list .choice span { min-width: 0; overflow-wrap: anywhere; }
+
+.supervision-panel { display: grid; gap: 10px; min-width: 0; margin-top: 20px; border-top: 1px solid var(--hilo-fuerte); padding-top: 12px; }
+.supervision-panel details { min-width: 0; }
+.supervision-panel p { overflow-wrap: anywhere; }
+@media (max-width: 480px) {
+  .topbar { grid-template-columns: minmax(0, 1fr) auto; padding: 8px; column-gap: 8px; }
+  .topbar-end { gap: 4px; }
+  .topbar-end button, .attention summary { padding-inline: 8px; }
+}

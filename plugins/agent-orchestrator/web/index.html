@@ -31,6 +31,7 @@
         </div>
       </details>
       <div id="connection" class="connection" role="status"></div>
+      <button id="notification-settings" type="button" data-i18n="notifications.title"></button>
       <button id="pause" type="button" aria-pressed="false"></button>
     </div>
   </header>
@@ -240,9 +241,34 @@
       <details><summary data-i18n="plan.advanced"></summary><label for="flow-expensive" data-i18n="plan.fieldExpensive"></label><textarea id="flow-expensive" name="expensive_executors" rows="2" maxlength="1000"></textarea><small class="muted" data-i18n="plan.expensiveHelp"></small></details>
       <div class="grid-2"><div><label for="flow-strategy" data-i18n="plan.fieldStrategy"></label><select id="flow-strategy" name="strategy"></select></div><div><label for="flow-risk" data-i18n="plan.fieldRisk"></label><select id="flow-risk" name="risk"></select></div></div>
       <label class="choice"><input type="checkbox" name="allow_dirty"><span data-i18n="launch.allowDirty"></span></label>
+      <label class="choice"><input id="flow-supervise" type="checkbox" name="supervise" checked><span data-i18n="supervision.enable"></span></label>
+      <label class="choice"><input id="flow-auto-repair" type="checkbox" name="auto_repair" checked><span data-i18n="supervision.autoRepair"></span></label>
+      <small class="muted" data-i18n="supervision.consent"></small>
       <label class="choice confirm"><input type="checkbox" name="confirm"><span data-i18n="flow.confirm"></span></label>
       <div class="form-error" role="alert"></div>
       <footer><button type="button" data-close data-i18n="dialog.cancel"></button><button type="submit" class="primary" data-i18n="flow.start"></button></footer>
+    </form>
+  </dialog>
+  <dialog id="dlg-notifications" aria-labelledby="dlg-notifications-title">
+    <form id="form-notifications" class="dialog-form" novalidate>
+      <header><h2 id="dlg-notifications-title" data-i18n="notifications.title"></h2><button type="button" class="close" data-close data-i18n-aria="dialog.close">&times;</button></header>
+      <p data-i18n="notifications.help"></p>
+      <label for="notification-mode" data-i18n="notifications.mode"></label><select id="notification-mode" name="mode"><option value="important" data-i18n="notifications.important"></option><option value="off" data-i18n="notifications.off"></option><option value="all" data-i18n="notifications.all"></option></select>
+      <div class="form-error" role="alert"></div>
+      <footer><button type="button" data-close data-i18n="dialog.cancel"></button><button type="submit" class="primary" data-i18n="projects.save"></button></footer>
+    </form>
+  </dialog>
+  <dialog id="dlg-supervision" aria-labelledby="dlg-supervision-title">
+    <form id="form-supervision" class="dialog-form" novalidate>
+      <header><h2 id="dlg-supervision-title" data-i18n="supervision.title"></h2><button type="button" class="close" data-close data-i18n-aria="dialog.close">&times;</button></header>
+      <p class="muted" data-i18n="supervision.consent"></p>
+      <label for="supervision-cli" data-i18n="flow.harness"></label><select id="supervision-cli" name="cli"></select>
+      <label for="supervision-model" data-i18n="plan.modelLabel"></label><input id="supervision-model" name="model" list="supervision-models" maxlength="128"><datalist id="supervision-models"></datalist>
+      <div id="supervision-access-group" hidden><label for="supervision-access-profile" data-i18n="access.coordinatorProfile"></label><select id="supervision-access-profile" name="access_profile"></select><small id="supervision-access-help" class="muted"></small></div>
+      <label class="choice"><input type="checkbox" name="auto_repair"><span data-i18n="supervision.autoRepair"></span></label>
+      <label class="choice confirm"><input type="checkbox" name="confirm"><span data-i18n="supervision.confirm"></span></label>
+      <div class="form-error" role="alert"></div>
+      <footer><button type="button" data-close data-i18n="dialog.cancel"></button><button type="submit" class="primary" data-i18n="supervision.start"></button></footer>
     </form>
   </dialog>
   <dialog id="dlg-proposal" aria-labelledby="dlg-proposal-title">

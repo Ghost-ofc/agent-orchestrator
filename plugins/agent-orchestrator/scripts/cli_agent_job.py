@@ -686,7 +686,7 @@ def answer_record(
             raise RunnerError(
                 f"Question is not pending; current state is {record.get('state')}"
             )
-        record.update(state="answered", answer=value, answered_at=utc_now())
+        record.update(state="answered", answer=value, answered_at=utc_now(), answered_by=details.get("responder", "user"))
         write_json(record_path, record)
         add_event(audit_path, event_type, **details)
     return record
@@ -700,13 +700,13 @@ def worker_question_path(path: Path, question_id: str) -> Path:
     return matches[0]
 
 
-def answer_worker_question(job_id: str, question_id: str, value: str) -> dict[str, Any]:
+def answer_worker_question(job_id: str, question_id: str, value: str, responder: str = "user") -> dict[str, Any]:
     path = job_dir(job_id)
     question_path = worker_question_path(path, question_id)
     if read_json(question_path).get("id") != question_id:
         raise RunnerError("Question ID does not match its record")
     answer_record(
-        question_path, value, path, "question_answered", question_id=question_id
+        question_path, value, path, "question_answered", question_id=question_id, responder=responder
     )
     return {"job_id": job_id, "state": "answered", "question_id": question_id}
 
@@ -784,7 +784,7 @@ def create_feedback(
     write_json(path / "feedback.json", record)
     add_event(path, "feedback_requested", feedback_id=selected_id)
     if notify:
-        notify_user("Agent Orchestrator", "The project orchestrator needs your input")
+        notify_user("Agent Orchestrator", "El coordinador necesita tu intervención. Revisa Atención en el panel.", category="attention", key="feedback:" + selected_id)
     return record
 
 
@@ -839,8 +839,34 @@ def command_answer_feedback(args: argparse.Namespace) -> int:
     return 0
 
 
-def notify_user(title: str, message: str) -> None:
-    """Best-effort local notification without including task or repository content."""
+def notify_user(title: str, message: str, *, category: str = "progress", key: str | None = None) -> None:
+    """Best-effort notifications; important-only by default, deduplicated across CLI processes."""
+    override = os.environ.get('AGENT_ORCHESTRATOR_NOTIFICATIONS')
+    if override == 'off':
+        return
+    settings_path = state_home() / 'notifications.json'
+    try:
+        settings = read_json(settings_path) if settings_path.exists() else {'mode': 'important'}
+        mode = override or settings.get('mode', 'important')
+        if mode == 'off' or (mode != 'all' and category not in {'attention', 'blocked', 'complete'}):
+            return
+        # Avoid duplicate final/attention notifications from runner and supervisor, and bursts.
+        path = state_home() / 'notification-deliveries.json'
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with record_lock(path):
+            delivered = read_json(path) if path.exists() else {}
+            now = time.time()
+            identity = hashlib.sha256((key or (category + ':' + title + ':' + message)).encode()).hexdigest()
+            if identity in delivered and now - delivered[identity] < 86400:
+                return
+            if now - delivered.get('_last_' + category, 0) < 20:
+                return
+            delivered = {k: v for k, v in delivered.items() if now - v < 86400}
+            delivered[identity] = now
+            delivered['_last_' + category] = now
+            write_json(path, delivered)
+    except (RunnerError, OSError, ValueError):
+        return
     try:
         if sys.platform == "darwin" and shutil.which("osascript"):
             script = (
@@ -3430,7 +3456,7 @@ def command_worker(args: argparse.Namespace) -> int:
     if meta.get("notify"):
         suffix = "; review required" if state == "succeeded" else ""
         notify_user(
-            "Agent Orchestrator", f"Job {meta['job_id']} finished: {state}{suffix}"
+            "Agent Orchestrator", f"Un agente terminó con estado {state}. Revisa el panel.", category="progress" if state == "succeeded" else "blocked", key="finished:" + meta["job_id"]
         )
     return 0 if state == "succeeded" else 1
 
@@ -3520,8 +3546,12 @@ def command_ask(args: argparse.Namespace) -> int:
         channel_dir(path), "question_asked", question_id=question_id, question=value
     )
     meta = read_json(path / "meta.json")
-    if meta.get("notify"):
-        notify_user("Agent Orchestrator", f"Job {args.job_id} needs input")
+    automatic = False
+    if meta.get('plan_id'):
+        import supervision
+        automatic = bool(supervision.read_state(meta['plan_id']).get('enabled')) and not supervision.SENSITIVE.search(value)
+    if meta.get("notify") and not automatic:
+        notify_user("Agent Orchestrator", "Un agente necesita tu intervención. Revisa Atención en el panel.", category="attention", key="question:" + args.job_id + ":" + question_id)
     deadline = time.monotonic() + args.wait_seconds
     while time.monotonic() < deadline:
         current = read_json(question_path)
@@ -3628,7 +3658,7 @@ def update_plan_after_review(meta: dict[str, Any], review: dict[str, Any]) -> No
     save_plan(path, plan)
     updated = read_json(path / "plan.json")
     if updated.get("complete") and not was_complete and meta.get("notify"):
-        notify_user("Agent Orchestrator", f"Plan {plan_id} is complete")
+        notify_user("Agent Orchestrator", "Plan revisado y completado: " + plan.get("title", plan_id), category="complete", key="plan:" + plan_id)
 
 
 def command_record_review(args: argparse.Namespace) -> int:
@@ -4422,9 +4452,9 @@ def validate_cli_args(args: argparse.Namespace) -> None:
         raise RunnerError("limit must be greater than zero")
     if (
         getattr(args, "max_changed_files", None) is not None
-        and args.max_changed_files <= 0
+        and args.max_changed_files < 0
     ):
-        raise RunnerError("max-changed-files must be greater than zero")
+        raise RunnerError("max-changed-files must be zero or greater")
     if getattr(args, "since_hours", 1) <= 0:
         raise RunnerError("since-hours must be greater than zero")
     for field in ("group", "role", "title", "reviewer"):

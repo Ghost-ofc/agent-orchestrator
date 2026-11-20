@@ -20,6 +20,7 @@ El panel permite crear proyectos y preparar flujos sin abrir una terminal para c
 - [Qué puedes hacer](#qué-puedes-hacer)
 - [Instalación](#instalación)
 - [Primer flujo desde el navegador](#primer-flujo-desde-el-navegador)
+- [Supervisión y resumen final](#supervisión-y-resumen-final)
 - [Proyectos y carpetas](#proyectos-y-carpetas)
 - [Modelos y agentes compatibles](#modelos-y-agentes-compatibles)
 - [Permisos MCP y SSH](#permisos-mcp-y-ssh)
@@ -99,9 +100,29 @@ python3 plugins/agent-orchestrator/scripts/cli_agent_job.py dashboard-web --no-o
 
 Si no indicas ejecutores, el motor resuelve y guarda un conjunto de modelos instalados según la estrategia y el riesgo. El coordinador puede distribuir tareas dentro de ese conjunto; no puede ampliarlo por su cuenta. Las asignaciones a modelos costosos protegidos requieren autorización explícita.
 
-**La ejecución es supervisada:** crear un flujo prepara una propuesta; aceptar el plan no lanza todas sus tareas ni acepta automáticamente sus resultados. Las propuestas inválidas y las asignaciones fuera del conjunto autorizado se rechazan.
+**La ejecución es supervisada:** crear un flujo prepara una propuesta; aceptar el plan no lanza todas sus tareas. La aceptación requiere revisión manual o supervisión autorizada con evidencia independiente. Las propuestas inválidas y las asignaciones fuera del conjunto autorizado se rechazan.
 
 El inspector permite consultar conversación, archivos, pruebas y consumo disponible. Un proceso terminado puede seguir **pendiente de revisión**. Cuando un proveedor no informa una métrica, se muestra como no disponible.
+
+## Supervisión y resumen final
+
+En **Nuevo flujo** puedes autorizar que el coordinador siga supervisando el plan después de planificarlo. El consentimiento indica que las revisiones y consultas consumen cuota del CLI/modelo elegido. Los planes anteriores conservan su funcionamiento manual hasta que actives **Supervisión y resumen**; también puedes seleccionar un revisor explícito para un plan creado sin coordinador.
+
+El supervisor funciona en el servidor local, sin depender de una pestaña abierta, y guarda sus operaciones para recuperarse tras reinicios. Atiende tres situaciones:
+
+- **Consultas técnicas:** el coordinador responde dentro del contrato y deja registrada su identidad. Las decisiones sobre alcance, producción, credenciales, permisos, presupuesto o autoridad insuficiente quedan para el usuario. Puedes intervenir directamente antes de su respuesta; el coordinador no sobrescribe una respuesta humana.
+- **Entregas:** recibe el contrato, la línea base, el informe del agente y el contexto del repositorio. Debe revisar el diff y ejecutar comprobaciones independientes. La aceptación automática exige comandos exitosos correlacionados con eventos de herramientas del revisor; las afirmaciones de su texto final no bastan. Si el workspace cambia durante la revisión, no se acepta esa entrega automáticamente.
+- **Correcciones:** si autorizas reparaciones automáticas, se reutilizan el ejecutor, perfil de recursos, presupuesto y límites de archivos originales. El motor mantiene el conjunto aprobado y el límite de tres intentos totales por tarea. Al agotar el límite, fallar un proceso o faltar evidencia, solicita intervención y evita reintentos indefinidos.
+
+La primera ejecución de cada tarea sigue requiriendo su lanzamiento. El coordinador no inicia tareas pendientes ni amplía sus permisos. **Pausar supervisión** impide nuevas intervenciones automáticas; no cancela trabajos que ya se lanzaron.
+
+En el detalle del plan, **Supervisión y resumen** reúne las entregas por tarea, veredictos, notas del revisor, comprobaciones ejecutadas, decisiones y pendientes humanos. El resumen indica si el plan sigue abierto o si todas sus tareas fueron aceptadas. Se guarda en `plans/<id>/supervision.json`; consultar el resumen no dispara otra llamada a un modelo.
+
+La verificación automática de comandos está implementada para los eventos de Claude Code y Codex CLI. Otros CLI pueden analizar o responder consultas, pero no obtienen aceptación automática sin evidencia compatible. En proyectos con acceso restringido, la terminal del revisor también está restringida: si no puede ejecutar las comprobaciones, escala el caso sin relajar la política. La huella verificable requiere un repositorio Git con commit inicial; los casos sin esa línea base necesitan revisión manual.
+
+### Notificaciones sin ruido
+
+**Avisos**, en la cabecera, permite elegir **Solo importantes** (predeterminado), **Silenciar todas** o **Todas**. El modo predeterminado conserva avisos de intervención, bloqueos y un único cierre del plan; los resultados y revisiones individuales se consultan en el panel. Se deduplican eventos durante 24 horas y se limita cada categoría a un aviso cada 20 segundos; los pendientes siguen visibles en Atención aunque un aviso se omita por ráfaga. La preferencia se guarda en `notifications.json`. Las pruebas automatizadas utilizan `AGENT_ORCHESTRATOR_NOTIFICATIONS=off` y no deben enviar avisos al escritorio.
 
 ## Proyectos y carpetas
 

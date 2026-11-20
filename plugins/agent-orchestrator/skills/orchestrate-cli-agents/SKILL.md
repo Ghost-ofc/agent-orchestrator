@@ -409,6 +409,19 @@ usage as zero cost.
 
 Completion by the worker is not completion of the task.
 
+A browser plan may explicitly authorize persistent supervision, using the selected coordinator or
+another explicitly selected reviewer. The dashboard service then handles bounded technical questions,
+independent reviews and optionally repairs. Inspect the plan's `supervision.json` before dispatching
+a duplicate review or answering a question the supervisor is already handling. This does not authorize
+new implementation models, resources, costs outside the selected reviewer, scope or production changes.
+Automatic acceptance requires successful tool execution evidence (currently Claude Code or Codex CLI)
+and a stable Git workspace fingerprint; unsupported evidence must escalate rather than pass silently.
+The plan report keeps deliveries, review notes, checks and unresolved human decisions together.
+
+Desktop notifications default to important events only: human intervention, blockers and one final
+plan completion. Individual completion/review progress remains in the panel. Honor the global
+`notifications.json` preference, and set `AGENT_ORCHESTRATOR_NOTIFICATIONS=off` for test fixtures.
+
 1. Inspect the complete diff against the recorded baseline and identify scope drift first.
 2. Re-read security-sensitive and boundary code directly. Reject secrets, permission expansion,
    destructive behavior, suppressed errors, and unrequested dependency or configuration changes.

@@ -19,6 +19,7 @@ import panel_actions
 import native_folders
 import project_access
 import ssh_inventory
+import supervision
 from project_identity import project_root, project_id, project_identity
 from agent_transcript import read_transcript
 
@@ -133,7 +134,7 @@ class DashboardState:
         latest = events[-1] if events else {}
         files = self.changed_files(workspace, status.get("git_baseline", {}))
         state = status.get("state")
-        if state == "succeeded":
+        if state == "succeeded" and status.get("role") != "orchestrator-supervision":
             state = status.get("acceptance_state", "awaiting_review")
         questions = [
             {
@@ -148,8 +149,18 @@ class DashboardState:
             }
             for question in status.get("pending_questions", [])
         ]
+        supervised = False
+        supervision_ops = []
+        if status.get('plan_id'):
+            supervisor = supervision.public_state(status['plan_id'])
+            supervised = bool(supervisor.get('enabled')) and not supervisor.get('error')
+            supervision_ops = supervisor['operations']
+        for question in questions:
+            op = next((op for op in supervision_ops if op.get('target') == path.name and op.get('question_id') == question['id']), {})
+            question['handled_by'] = 'orchestrator' if supervised and op.get('state') != 'needs_user' and not supervision.SENSITIVE.search(question['question']) else 'user'
         row = {
             "job_id": path.name,
+            "supervised": supervised,
             "project_id": pid,
             "source": "worker",
             "cli": status.get("cli") or status.get("agent"),
@@ -267,7 +278,7 @@ class DashboardState:
             rows = project["jobs"]
             project["active"] = sum(bool(row["active"]) for row in rows)
             project["question_count"] = len(project["pending_feedback"]) + sum(
-                len(row["pending_questions"]) for row in rows
+                sum(q.get("handled_by") != "orchestrator" for q in row["pending_questions"]) for row in rows
             )
             # Project-level attention is reserved for questions a user can act on now.
             # Historical failures and unreviewed runs stay visible on their agent rows
@@ -335,6 +346,7 @@ class DashboardState:
                     "question",
                     "state",
                     "verdict",
+                    "responder",
                 )
             }
             for event in detail["events"]
@@ -345,7 +357,8 @@ class DashboardState:
             "has_flow": (path / "flow.json").is_file(),
             "questions": [
                 {
-                    key: q.get(key)
+                    "handled_by": next((question.get("handled_by") for question in row["pending_questions"] if question["id"] == q["id"]), "user"),
+                    **{key: q.get(key)
                     for key in (
                         "id",
                         "state",
@@ -354,7 +367,8 @@ class DashboardState:
                         "answer",
                         "answered_at",
                         "expired_at",
-                    )
+                        "answered_by",
+                    )}
                 }
                 for q in jobs.read_questions(path)
             ],
@@ -551,6 +565,13 @@ class DashboardState:
 
     def act(self, parts: list[str], body: dict) -> dict:
         """Dispatch a state-changing request. The engine itself enforces every policy."""
+        if parts == ["api", "notifications"]:
+            panel_actions.only_fields(body, ('mode',))
+            mode = panel_actions.choice(body, 'mode', ('important', 'off', 'all'))
+            if mode is None:
+                raise panel_actions.invalid('mode')
+            jobs.write_json(jobs.state_home() / 'notifications.json', {'mode': mode})
+            return {'mode': mode}
         if parts == ["api", "ssh", "organization"]:
             return self.organize_ssh(body)
         if len(parts) == 4 and parts[:2] == ["api", "projects"] and parts[3] == "access":
@@ -563,6 +584,16 @@ class DashboardState:
             return self.update_project(parts[2], body)
         if len(parts) < 4 or parts[:2] != ["api", "projects"]:
             raise jobs.RunnerError("Unknown action route")
+        if len(parts) == 6 and parts[3] == 'plans' and parts[5] == 'supervision':
+            _, plan = self.verified_plan(parts[2], parts[4])
+            panel_actions.only_fields(body, ('enabled', 'confirm'), ('auto_repair', 'reviewer', 'access_profile'))
+            if body.get('confirm') is not True:
+                raise panel_actions.invalid('confirm')
+            reviewer = panel_actions.text(body, 'reviewer', required=False, limit=200, single_line=True)
+            if reviewer and not panel_actions.EXECUTOR_RE.fullmatch(reviewer):
+                raise panel_actions.invalid('reviewer')
+            profile = panel_actions.text(body, 'access_profile', required=False, limit=64, single_line=True)
+            return supervision.configure(plan, panel_actions.flag(body, 'enabled'), panel_actions.flag(body, 'auto_repair'), reviewer, profile)
         registry_path = project_registry_path()
         registry_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         with jobs.record_lock(registry_path):
@@ -763,6 +794,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 data = self.server.state.transcript(
                     parts[2], parts[4], etag if etag and ETAG_RE.fullmatch(etag) else None
                 )
+            elif self.path == '/api/notifications':
+                settings_path = jobs.state_home() / 'notifications.json'
+                settings = jobs.read_json(settings_path) if settings_path.exists() else {}
+                data = {'mode': settings.get('mode', 'important')}
             elif self.path == "/api/overview":
                 data = self.server.state.overview()
             elif len(parts) == 4 and parts[:2] == ["api", "projects"] and parts[3] == "access":
@@ -903,6 +938,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
 def serve(port=0, open_browser=True, token=None) -> int:
     with DashboardServer(port) as server:
+        supervisor = supervision.Supervisor()
+        supervisor.thread.start()
         if token is not None:
             server.token = token
             server.url = f"{server.origin}/#token={token}"
@@ -922,6 +959,7 @@ def serve(port=0, open_browser=True, token=None) -> int:
         except KeyboardInterrupt:
             return 0
         finally:
+            supervisor.stop.set()
             try:
                 current = jobs.read_json(runtime_path)
                 if current.get("pid") == os.getpid():

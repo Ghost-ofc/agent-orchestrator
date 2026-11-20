@@ -25,7 +25,7 @@ class DashboardTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.env = patch.dict(
-            os.environ, {"AGENT_ORCHESTRATOR_HOME": str(self.root / "state")}
+            os.environ, {"AGENT_ORCHESTRATOR_HOME": str(self.root / "state"), "AGENT_ORCHESTRATOR_NOTIFICATIONS": "off"}
         )
         self.env.start()
         self.addCleanup(self.env.stop)

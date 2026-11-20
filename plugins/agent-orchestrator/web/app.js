@@ -137,10 +137,11 @@
       }
       for (const job of project.jobs) {
         for (const question of job.pending_questions) {
+          if (question.handled_by === 'orchestrator') continue;
           items.push({ key: `q:${project.id}:${job.job_id}:${question.id}`, kind: 'question', pid: project.id, job: job.job_id,
             title: agentName(job), text: question.question, project: project.name });
         }
-        if (job.state === 'awaiting_review' || job.state === 'repair_required') {
+        if (!job.supervised && (job.state === 'awaiting_review' || job.state === 'repair_required')) {
           items.push({ key: `r:${job.job_id}`, kind: 'review', pid: project.id, job: job.job_id,
             title: agentName(job), text: statusLabel(job), project: project.name });
         }
@@ -502,6 +503,7 @@
 
   // ---------- Inspector ----------
   function authorOf(event) {
+    if (event.responder?.startsWith('orchestrator:')) return t('author.coordinator');
     return event.source === 'worker' ? t('author.worker') : event.source === 'orchestrator' ? t('author.coordinator') : t('author.runner');
   }
   const LONG_TEXT = 600;
@@ -613,6 +615,7 @@
         form.append(header, node('p', source, 'source-label'), node('p', q.question, 'question-text'));
         if (q.context) form.append(node('p', q.context, 'context'));
         form.append(inputLabel, input, submit, result);
+        if (q.handled_by === 'orchestrator') result.textContent = t('supervision.handling');
         form.addEventListener('submit', async event => {
           event.preventDefault();
           if (!input.value.trim()) { result.textContent = t('question.empty'); input.focus(); return; }
@@ -628,6 +631,7 @@
         });
         parent.append(form);
       }
+      if (!form.dataset.answered && !form.contains(document.activeElement)) form.querySelector('.result').textContent = q.handled_by === 'orchestrator' ? t('supervision.handling') : '';
       existing.delete(route);
     }
     for (const form of existing.values()) if (!held.includes(form) && form.dataset.answered !== 'true') form.remove();

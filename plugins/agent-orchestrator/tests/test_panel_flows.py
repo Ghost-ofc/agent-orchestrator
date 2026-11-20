@@ -119,3 +119,14 @@ class FlowTests(ActionBase):
             self.assertEqual(code, 200, started)
             self.wait_finished(started["job_id"])
             self.assertEqual(self.proposal(started["job_id"])[1]["tasks"], [self.task])
+
+    def test_supervised_flow_records_consent_and_coordinator_for_later_reviews(self):
+        code, started = self.start(supervise=True, auto_repair=True)
+        self.assertEqual(code, 200, started)
+        self.wait_finished(started['job_id'])
+        code, plan = self.accept(started['job_id'])
+        self.assertEqual(code, 200, plan)
+        self.assertTrue(plan['supervision']['enabled'])
+        self.assertTrue(plan['supervision']['auto_repair'])
+        self.assertEqual(plan['supervision']['coordinator']['executor'], 'claude-code=sonnet')
+        self.assertEqual(self.start(supervise=False, auto_repair=True)[0], 400)

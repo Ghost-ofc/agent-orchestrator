@@ -17,6 +17,7 @@ window.AOActions = ctx => {
   let catalog = null;
   let launching = null;
   let proposing = null;
+  let supervising = null;
   let flowProject = null;
   let managedProject = null;
 
@@ -62,6 +63,14 @@ window.AOActions = ctx => {
     prepare?.(element);
     dialog(id).showModal();
   }
+
+  $('notification-settings').addEventListener('click', async () => {
+    open('notifications');
+    const element = form('notifications'); element.querySelector('[type=submit]').disabled = true;
+    try { element.elements.mode.value = (await api('/api/notifications')).mode; element.querySelector('[type=submit]').disabled = false; }
+    catch (error) { showError(element, error); }
+  });
+  wire('notifications', async element => { await api('/api/notifications', { mode: element.elements.mode.value }); });
 
   // Project lifecycle stays separate from plan/job execution.
   $('new-project').addEventListener('click', () => { pickedParent = null; pickerGeneration++; $('project-pick-folder').disabled = false; form('project').elements.mode.disabled = false; open('project'); $('project-picker-status').textContent = ''; syncProjectMode(); });
@@ -385,6 +394,36 @@ window.AOActions = ctx => {
     const limit = plan.executor_policy.max_attempts_per_item;
     for (const [label, value] of [[t('flow.coordinator'), plan.coordinator?.executor || 'Codex'], [t('plan.fieldStrategy'), plan.goal.strategy], [t('plan.fieldRisk'), plan.goal.risk], [t('plan.fieldType'), plan.goal.task_type],
       [t('plan.fieldTopology'), plan.team_policy?.topology], [t('plan.fieldParallel'), plan.team_policy?.max_parallel], [t('plan.attemptLimit'), limit ?? '—']]) meta.append(node('dt', label), node('dd', st('plan', value ?? '')));
+    let supervisionPanel = section.querySelector('.supervision-panel');
+    if (!supervisionPanel) { supervisionPanel = node('section', null, 'supervision-panel'); section.append(supervisionPanel); }
+    supervisionPanel.replaceChildren(node('h4', t('supervision.title')));
+    const supervision = plan.supervision || {};
+    supervisionPanel.append(node('p', t(supervision.enabled ? 'supervision.active' : 'supervision.paused'), 'muted'));
+    {
+      const button = node('button', t(supervision.enabled ? 'supervision.stop' : 'supervision.start')); button.type = 'button';
+      button.addEventListener('click', async () => {
+        button.disabled = true;
+        try {
+          if (supervision.enabled) { await api(`/api/projects/${state.project}/plans/${plan.plan_id}/supervision`, { enabled: false, confirm: true }); await ctx.refresh(); }
+          else await openSupervision(plan);
+        } catch (error) { supervisionPanel.append(node('p', error.message, 'form-error')); }
+        finally { button.disabled = false; }
+      });
+      supervisionPanel.append(button);
+    }
+    if (supervision.error) supervisionPanel.append(node('p', supervision.error, 'form-error'));
+    const report = supervision.report;
+    if (report) {
+      supervisionPanel.append(node('p', report.summary));
+      for (const item of report.tasks || []) {
+        const details = node('details'); details.append(node('summary', `${item.title} · ${item.verdict ? st('state', item.verdict) : t('supervision.pending')}`));
+        details.append(node('h5', t('supervision.agentReport')), node('pre', item.delivery || '—', 'engine-detail'), node('h5', t('supervision.review')), node('pre', item.review || '—', 'engine-detail'));
+        if (item.tests?.length) details.append(node('h5', t('supervision.tests')), node('pre', item.tests.join('\n'), 'engine-detail'));
+        supervisionPanel.append(details);
+      }
+      for (const decision of report.decisions || []) supervisionPanel.append(node('p', decision));
+      for (const issue of report.needs_user || []) supervisionPanel.append(node('p', `${t('supervision.user')}: ${issue.reason}`, 'access-boundary'));
+    }
     const allowed = section.querySelector('.plan-executors'); allowed.replaceChildren();
     if (!plan.executor_policy.allowed.length) allowed.append(node('li', t('plan.noExecutors'), 'muted'));
     plan.executor_policy.allowed.forEach(entry => allowed.append(node('li', entry.display)));
@@ -515,9 +554,10 @@ window.AOActions = ctx => {
   });
 
   // A browser-created flow starts a bounded planning job, then imports its reviewed proposal.
+  $('flow-supervise').addEventListener('change', event => { $('flow-auto-repair').disabled = !event.target.checked; });
   $('new-flow').addEventListener('click', async () => {
     flowProject = state.project;
-    open('flow');
+    open('flow'); $('flow-auto-repair').disabled = false;
     const element = form('flow');
     const data = await loadCatalog(element);
     if (!data) return;
@@ -545,8 +585,43 @@ window.AOActions = ctx => {
     if (!element.elements.confirm.checked) throw problem('flow.needConfirm');
     const result = await api(`/api/projects/${flowProject}/flows`, { title: value('title'), goal: value('goal'),
       coordinator: value('cli') + (value('model') ? '=' + value('model') : ''), ...(value('access_profile') ? { access_profile: value('access_profile') } : {}), tasks: lines(value('tasks')),
-      executors: lines(value('executors')), expensive_executors: lines(value('expensive_executors')), strategy: value('strategy'), risk: value('risk'), confirm: true, allow_dirty: element.elements.allow_dirty.checked });
+      executors: lines(value('executors')), expensive_executors: lines(value('expensive_executors')), strategy: value('strategy'), risk: value('risk'), confirm: true, supervise: element.elements.supervise.checked, auto_repair: element.elements.supervise.checked && element.elements.auto_repair.checked, allow_dirty: element.elements.allow_dirty.checked });
     state.pendingJob = result.job_id;
+  });
+  async function openSupervision(plan) {
+    supervising = { project: state.project, plan: plan.plan_id };
+    open('supervision');
+    const element = form('supervision');
+    element.querySelector('[type=submit]').disabled = true;
+    try {
+      const data = await loadCatalog(element);
+      if (!data) return;
+      const access = await api(`/api/projects/${supervising.project}/access`);
+      fillAccessProfile('supervision', access.policy);
+      const installed = data.harnesses.filter(entry => entry.available && (!access.policy.enabled || ['claude-code', 'claude'].includes(entry.cli)));
+      const select = $('supervision-cli');
+      select.replaceChildren(...installed.map(entry => { const option = node('option', entry.display_name || entry.cli); option.value = entry.cli; return option; }));
+      const coordinator = plan.supervision?.coordinator || plan.coordinator || {};
+      const [cli, ...model] = (coordinator.executor || '').split('=');
+      if (installed.some(entry => entry.cli === cli)) select.value = cli;
+      const models = () => {
+        $('supervision-model').value = '';
+        $('supervision-models').replaceChildren(...(installed.find(entry => entry.cli === select.value)?.configured_models || []).map(value => { const option = node('option'); option.value = value; return option; }));
+      };
+      select.onchange = models; models();
+      if (select.value === cli) $('supervision-model').value = model.join('=');
+      if (coordinator.access_profile) $('supervision-access-profile').value = coordinator.access_profile;
+      if (!installed.length) throw problem('flow.noHarness');
+      element.querySelector('[type=submit]').disabled = false;
+    } catch (error) { showError(element, error); }
+  }
+  wire('supervision', async element => {
+    const cli = element.elements.cli.value;
+    const model = element.elements.model.value.trim();
+    if (!model && cli !== 'deepseek-harness') throw problem('flow.noModel');
+    if (!element.elements.confirm.checked) throw problem('flow.needConfirm');
+    await api(`/api/projects/${supervising.project}/plans/${supervising.plan}/supervision`, { enabled: true, confirm: true,
+      reviewer: cli + (model ? '=' + model : ''), access_profile: element.elements.access_profile.value || null, auto_repair: element.elements.auto_repair.checked });
   });
   async function openProposal() {
     proposing = { project: state.project, job: state.agent };

@@ -23,6 +23,7 @@ from typing import Any, Iterator
 
 import cli_agent_job as jobs
 import project_access
+import supervision
 
 ENGINE = Path(jobs.__file__).resolve()
 REVIEWER = "dashboard-user"
@@ -237,6 +238,7 @@ def plan_view(plan: dict[str, Any]) -> dict[str, Any]:
             ],
             "fallback": {key: fallback.get(key) for key in ("enabled", "cli", "model", "user_preapproved")},
         },
+        "supervision": supervision.public_state(plan["plan_id"]),
         "items": items,
     }
 
@@ -402,9 +404,13 @@ def executor_spec(entry: dict[str, Any]) -> str:
 
 def start_flow(workspace: str, body: Any) -> Any:
     body = only_fields(body, ("title", "goal", "coordinator", "confirm"),
-                       ("tasks", "executors", "expensive_executors", "strategy", "risk", "allow_dirty", "access_profile"))
+                       ("tasks", "executors", "expensive_executors", "strategy", "risk", "allow_dirty", "access_profile", "supervise", "auto_repair"))
     if body.get("confirm") is not True:
         raise invalid("confirm", "Confirm the selected coordinator before starting")
+    supervise = flag(body, "supervise")
+    auto_repair = flag(body, "auto_repair")
+    if auto_repair and not supervise:
+        raise invalid("auto_repair", "Activa la supervisión para autorizar reparaciones automáticas.")
     title = text(body, "title", limit=200, single_line=True)
     goal = text(body, "goal", limit=5000)
     coordinator = text(body, "coordinator", limit=200, single_line=True) or ""
@@ -479,7 +485,8 @@ def start_flow(workspace: str, body: Any) -> Any:
         launched = run_engine([*argv, f"--task-file={task_file}"])
     path = jobs.job_dir(launched["job_id"])
     jobs.write_json(path / "flow.json", {"title": title, "goal": goal, "coordinator": coordinator,
-                                        "pool": pool, "strategy": strategy, "risk": risk, "pins": pins, "requested_tasks": requested})
+                                        "pool": pool, "strategy": strategy, "risk": risk, "pins": pins, "requested_tasks": requested,
+                                        "access_profile": access_profile, "supervise": supervise, "auto_repair": auto_repair})
     return {"job_id": launched["job_id"]}
 
 
@@ -561,8 +568,10 @@ def accept_flow(path: Path, workspace: str, body: Any) -> Any:
             for item, proposed, assignment in zip(plan["items"], proposal["tasks"], assignments):
                 item["task"] = task_contract(proposed, record["goal"])
                 item["assigned_executor"] = assignment
-            plan["coordinator"] = {"executor": record["coordinator"], "job_id": path.name}
+            plan["coordinator"] = {"executor": record["coordinator"], "job_id": path.name, "access_profile": record.get("access_profile")}
             jobs.save_plan(plan_path, plan)
+        if record.get("supervise"):
+            supervision.configure(plan, True, record.get("auto_repair", False))
         record["plan_id"] = plan_id
         jobs.write_json(path / "flow.json", record)
         return jobs.read_plan(plan_id)[1]

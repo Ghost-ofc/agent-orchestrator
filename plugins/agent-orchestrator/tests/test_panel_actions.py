@@ -47,7 +47,7 @@ class ActionBase(unittest.TestCase):
         fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
         self.env = patch.dict(
             os.environ,
-            {"AGENT_ORCHESTRATOR_HOME": str(root / "state"), "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+            {"AGENT_ORCHESTRATOR_NOTIFICATIONS": "off", "AGENT_ORCHESTRATOR_HOME": str(root / "state"), "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
         )
         self.env.start()
         self.addCleanup(self.env.stop)
