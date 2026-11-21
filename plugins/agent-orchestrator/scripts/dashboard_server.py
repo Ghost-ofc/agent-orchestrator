@@ -176,6 +176,7 @@ class DashboardState:
             "group": status.get("group"),
             "plan_id": status.get("plan_id"),
             "checklist_item": status.get("checklist_item"),
+            "depends_on": status.get("depends_on") or [],
             "state": state,
             "execution_state": status.get("execution_state"),
             "review_state": status.get("review_state"),

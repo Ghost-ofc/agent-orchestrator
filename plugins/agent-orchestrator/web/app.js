@@ -202,23 +202,82 @@
   }
 
   // ---------- Canvas: project -> plans -> jobs, drawn only from real relations ----------
-  const NODE = { w: 288, jobH: 124, cardH: 108, gap: 32, cols: [0, 360, 720] };
+  const NODE = { w: 288, jobH: 124, cardH: 108, gap: 32, colStep: 360 };
+  function colX(col) { return col === 0 ? 0 : col * NODE.colStep; }
   function buildGraph(project, rows) {
     const grouped = new Map(project.plans.map(plan => [plan.plan_id, []]));
     const loose = [];
     for (const job of rows) (grouped.has(job.plan_id) ? grouped.get(job.plan_id) : loose).push(job);
     const nodes = []; const links = []; const planNodes = [];
-    const place = (kind, key, column, top, h, data) => { const item = { kind, key, x: NODE.cols[column], y: top, h, ...data }; nodes.push(item); return item; };
+    const place = (kind, key, column, top, h, data) => { const item = { kind, key, x: colX(column), y: top, h, ...data }; nodes.push(item); return item; };
     let y = 0;
     for (const plan of project.plans) {
       const group = grouped.get(plan.plan_id);
-      const slots = Math.max(group.length, 1);
-      const block = slots * NODE.jobH + (slots - 1) * NODE.gap;
-      const planNode = place('plan', `plan:${plan.plan_id}`, 1, y + (block - NODE.cardH) / 2, NODE.cardH, { plan });
-      group.forEach((job, index) => {
-        const jobNode = place('job', `job:${job.job_id}`, 2, y + index * (NODE.jobH + NODE.gap), NODE.jobH, { job });
-        links.push({ from: planNode, to: jobNode, tone: tone(job) });
+      const jobMap = new Map(group.map(j => [j.job_id, j]));
+      function getJobDependencies(job) {
+        const direct = (job.depends_on || []).filter(id => jobMap.has(id));
+        if (direct.length) return direct;
+        const itemDeps = (job.depends_on || []).filter(id => typeof id === 'string' && id.startsWith('item-'));
+        if (itemDeps.length) {
+          const matched = [];
+          itemDeps.forEach(itemId => {
+            group.forEach(j => { if (j.checklist_item === itemId && !matched.includes(j.job_id)) matched.push(j.job_id); });
+          });
+          if (matched.length) return matched;
+        }
+        return [];
+      }
+      const depths = new Map();
+      function getDepth(job) {
+        if (depths.has(job.job_id)) return depths.get(job.job_id);
+        const deps = getJobDependencies(job);
+        if (!deps.length) { depths.set(job.job_id, 0); return 0; }
+        depths.set(job.job_id, 0);
+        const d = 1 + Math.max(...deps.map(id => getDepth(jobMap.get(id))));
+        depths.set(job.job_id, d);
+        return d;
+      }
+      group.forEach(getDepth);
+
+      const layers = new Map();
+      group.forEach(job => {
+        const d = depths.get(job.job_id) || 0;
+        if (!layers.has(d)) layers.set(d, []);
+        layers.get(d).push(job);
       });
+
+      const maxRows = Math.max(1, ...Array.from(layers.values()).map(l => l.length));
+      const block = maxRows * NODE.jobH + (maxRows - 1) * NODE.gap;
+      const planNode = place('plan', `plan:${plan.plan_id}`, 1, y + (block - NODE.cardH) / 2, NODE.cardH, { plan });
+      const jobNodes = new Map();
+
+      const sortedDepths = Array.from(layers.keys()).sort((a, b) => a - b);
+      sortedDepths.forEach(depth => {
+        const layerJobs = layers.get(depth);
+        const col = 2 + depth;
+        const layerHeight = layerJobs.length * NODE.jobH + (layerJobs.length - 1) * NODE.gap;
+        const layerStart = y + (block - layerHeight) / 2;
+        layerJobs.forEach((job, idx) => {
+          const top = layerStart + idx * (NODE.jobH + NODE.gap);
+          const jobNode = place('job', `job:${job.job_id}`, col, top, NODE.jobH, { job });
+          jobNodes.set(job.job_id, jobNode);
+        });
+      });
+
+      group.forEach(job => {
+        const jobNode = jobNodes.get(job.job_id);
+        if (!jobNode) return;
+        const deps = getJobDependencies(job).filter(id => jobNodes.has(id));
+        if (deps.length) {
+          deps.forEach(depId => {
+            const depNode = jobNodes.get(depId);
+            links.push({ from: depNode, to: jobNode, tone: tone(job) });
+          });
+        } else {
+          links.push({ from: planNode, to: jobNode, tone: tone(job) });
+        }
+      });
+
       planNodes.push(planNode);
       y += block + NODE.gap * 2;
     }
@@ -228,7 +287,8 @@
     nodes.unshift(nodes.pop());
     for (const planNode of planNodes) links.push({ from: root, to: planNode, tone: planNode.plan.complete ? 'green' : 'neutral' });
     for (const looseNode of looseNodes) links.push({ from: root, to: looseNode, tone: tone(looseNode.job) });
-    return { nodes, links, width: NODE.cols[2] + NODE.w, height };
+    const width = Math.max(720 + NODE.w, ...nodes.map(item => item.x + NODE.w));
+    return { nodes, links, width, height };
   }
   function curve(a, b) {
     const x1 = a.x + NODE.w; const y1 = a.y + a.h / 2; const x2 = b.x; const y2 = b.y + b.h / 2; const dx = (x2 - x1) / 2;
