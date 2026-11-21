@@ -57,19 +57,40 @@ def get_assistant_texts(job_path: Path) -> list[str]:
     except Exception:
         pass
 
-    # 3. Add tail of log if plain text or needed
-    try:
-        with log_path.open('r', encoding='utf-8', errors='replace') as handle:
-            handle.seek(0, 2)
-            size = handle.tell()
-            handle.seek(max(0, size - 120000))
-            tail = handle.read()
-            if tail:
-                texts.append(tail)
-    except Exception:
-        pass
+    # The raw tail is a source only for plain-output CLIs, where the whole log IS the answer. In a
+    # structured event stream it also holds tool output and repository text the planner read, which
+    # is untrusted and could carry a forged contract object, so it is excluded there.
+    if not structured_log(log_path):
+        try:
+            with log_path.open('r', encoding='utf-8', errors='replace') as handle:
+                handle.seek(0, 2)
+                size = handle.tell()
+                handle.seek(max(0, size - 120000))
+                tail = handle.read()
+                if tail:
+                    texts.append(tail)
+        except Exception:
+            pass
 
     return texts
+
+
+def structured_log(log_path) -> bool:
+    """True when stdout is an event stream (JSON lines carrying a 'type' or 'event' key)."""
+    try:
+        with log_path.open('r', encoding='utf-8', errors='replace') as handle:
+            for number, line in enumerate(handle):
+                if number >= 200:
+                    break
+                try:
+                    value = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(value, dict) and ('type' in value or 'event' in value):
+                    return True
+    except OSError:
+        return False
+    return False
 
 
 def validate_contract(task):
@@ -265,9 +286,12 @@ def batch_view(plan):
                 try:
                     task = validate_contract(entry.get('task'))
                     executor = entry.get('assigned_executor')
-                    if executor not in allowed and allowed:
-                        executor = next(iter(allowed))
-                    deps = [d for d in entry.get('depends_on', []) if d in item_map and d != item_id]
+                    pinned = item_map[item_id].get('assigned_executor')
+                    if executor not in allowed or (pinned and executor != pinned):
+                        raise jobs.RunnerError('Ejecutor no autorizado o distinto del fijado para esta tarea.')
+                    deps = entry.get('depends_on', [])
+                    if not isinstance(deps, list) or any(d not in item_map or d == item_id for d in deps):
+                        raise jobs.RunnerError('Dependencias inválidas.')
                     items_res.append({
                         'id': item_id,
                         'title': item_map[item_id]['title'],
@@ -388,11 +412,18 @@ def batch_accept(plan, body):
     changes['revision'] = proposal['revision']
     changes['contract_source'] = {'batch': True, 'job_id': proposal['job_id']}
 
+    if not isinstance(items_to_apply, list) or any(not isinstance(it, dict) or not {'id', 'task', 'assigned_executor'}.issubset(it) for it in items_to_apply):
+        raise actions.invalid('items', 'Cada contrato necesita id, task y assigned_executor.')
     applied_map = {it['id']: it for it in items_to_apply}
     for row in changes['items']:
         if row['id'] in applied_map:
             match = applied_map[row['id']]
-            row['task'] = validate_contract(match['task'])
+            try:
+                row['task'] = validate_contract(match['task'])
+            except jobs.RunnerError as exc:
+                raise actions.invalid('items', str(exc)) from exc
+            if row.get('assigned_executor') and match['assigned_executor'] != row['assigned_executor']:
+                raise actions.invalid('assigned_executor', 'Conserva la asignación explícita de esta tarea.')
             row['assigned_executor'] = match['assigned_executor']
             row['depends_on'] = match.get('depends_on', [])
 

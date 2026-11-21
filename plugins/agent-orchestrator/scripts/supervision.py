@@ -13,7 +13,7 @@ from agent_transcript import read_transcript
 
 ACTIVE = {'starting', 'running', 'needs_input', 'cancelling'}
 # Conservative escalation before asking a model. This is routing, not a permission boundary.
-SENSITIVE = re.compile(r'production|producci[oó]n|credential|credencial|contrase[nñ]a|password|secret|secreto|permission|permiso|privileg|deploy|desplegar|borrar|eliminar|delete|drop\b|pagar|payment|billing|coste|costo|budget|presupuesto|scope|alcance|authoriz|autoriz|security|seguridad|migraci[oó]n', re.I)
+SENSITIVE = re.compile(r'\bssh\b|\bscp\b|\broot\b|\bsudo\b|\bprod\b|\bprd\b|\brm\s+-|chmod|chown|systemctl|\bdns\b|production|producci[oó]n|credential|credencial|contrase[nñ]a|password|secret|secreto|permission|permiso|privileg|deploy|desplegar|borrar|eliminar|delete|drop\b|pagar|payment|billing|coste|costo|budget|presupuesto|scope|alcance|authoriz|autoriz|security|seguridad|migraci[oó]n', re.I)
 
 
 def state_path(plan_id):
@@ -117,6 +117,15 @@ def decision(path):
     return value
 
 
+EXIT_CODE = re.compile(r'(?:exited with code|exit code)\s*[:=]?\s*(-?\d+)\b', re.I)
+
+
+def exit_code_zero(output):
+    """Success only if the tool reported an exit code and every reported code is exactly 0."""
+    codes = EXIT_CODE.findall(output or '')
+    return bool(codes) and all(int(code) == 0 for code in codes)
+
+
 def successful_commands(path):
     """Correlate successful tool executions; never accept test strings from the final prose alone."""
     calls, passed = {}, set()
@@ -141,7 +150,7 @@ def successful_commands(path):
             info = su.get('tool_info') or {}
             out = info.get('output') or ''
             cmd = info.get('parameters', {}).get('CommandLine')
-            if cmd and isinstance(cmd, str) and ('Command exited with code 0' in out or 'exit code: 0' in out.lower() or 'exit 0' in out.lower()):
+            if cmd and isinstance(cmd, str) and exit_code_zero(out):
                 passed.add(cmd.strip())
         message = value.get('message') or {}
         for block in message.get('content', []) if isinstance(message.get('content'), list) else []:
@@ -265,14 +274,11 @@ def apply_decision(plan, state, op):
         raise jobs.RunnerError('Evidencias de validación inválidas.')
     passed = successful_commands(review_path)
     if action == 'accepted':
-        if not passed:
+        # Exact match only: every claimed check must be a command the reviewer really ran with exit 0.
+        bases = [c.split(' → ')[0].split(' -> ')[0].strip() for c in checks]
+        if not bases or not set(bases).issubset(passed):
             raise jobs.RunnerError('La aceptación no tiene comandos de validación exitosos correlacionados con herramientas del revisor.')
-        verified = []
-        for c in checks:
-            base = c.split(' → ')[0].split(' -> ')[0].strip()
-            if base in passed or any(base in p or p in base for p in passed):
-                verified.append(base)
-        checks = verified if verified else sorted(passed)
+        checks = bases
     if action == 'repair_required' and (not isinstance(result.get('repair'), str) or not 1 <= len(result['repair']) <= 8000):
         raise jobs.RunnerError('La reparación necesita instrucciones acotadas.')
     if not (source / 'review.json').exists():
@@ -308,7 +314,7 @@ def tick(plan_id):
     config_path = state_path(plan_id)
     with jobs.record_lock(config_path):
         state = read_state(plan_id)
-        if not state.get('enabled'):
+        if not state.get('enabled') or plan.get('deleted') or plan.get('dismissed'):
             return
         # Lifecycle lock serializes launches against archiving/removal and permission changes.
         registry_path = jobs.state_home() / 'projects.json'
@@ -405,7 +411,7 @@ def tick(plan_id):
 
 
 def launch_eligible_pending_items(plan, state, all_jobs):
-    if not state.get('enabled') or not state.get('auto_advance'):
+    if not state.get('enabled') or not state.get('auto_advance') or plan.get('deleted') or plan.get('dismissed'):
         return
     import panel_actions as actions
     workspace = plan['workspace']
@@ -414,6 +420,10 @@ def launch_eligible_pending_items(plan, state, all_jobs):
     for j in all_jobs:
         if j.get('execution_state') in ACTIVE and j.get('plan_id') == plan['plan_id']:
             active_in_plan += 1
+    # Never run two writers in one workspace: concurrent edits clobber each other and break baselines.
+    here = Path(workspace).resolve()
+    if any(j.get('execution_state') in ACTIVE and Path(j.get('workspace', '')).resolve() == here for j in all_jobs):
+        return
 
     item_map = {item['id']: item for item in plan.get('items', [])}
     for item in plan.get('items', []):
@@ -452,7 +462,7 @@ def launch_eligible_pending_items(plan, state, all_jobs):
         model = selected.get('model')
 
         argv = ['launch', f"--cli={cli}", f"--workspace={workspace}", f"--plan-id={plan['plan_id']}",
-                f"--checklist-item={item['id']}", '--allow-dirty', '--allow-concurrent-workspace', '--json']
+                f"--checklist-item={item['id']}", '--json']
         if model:
             argv.append(f"--model={model}")
         argv.extend(dep_job_args)
@@ -463,6 +473,7 @@ def launch_eligible_pending_items(plan, state, all_jobs):
                 active_in_plan += 1
                 if isinstance(res, dict) and res.get('job_id'):
                     all_jobs.append(jobs.get_status(jobs.job_dir(res['job_id'])))
+                break  # one writer per workspace: the next item starts after this one finishes
             except Exception as exc:
                 state['error'] = f"Error al lanzar automáticamente {item['id']}: {exc}"
                 break

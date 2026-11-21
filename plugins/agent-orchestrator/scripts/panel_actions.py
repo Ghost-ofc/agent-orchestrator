@@ -317,9 +317,7 @@ def delete_job(job_id: str, body: Any) -> Any:
         meta = jobs.read_json(meta_file)
         meta["dismissed"] = True
         jobs.write_json(meta_file, meta)
-    if not status.get("plan_id"):
-        import shutil
-        shutil.rmtree(path, ignore_errors=True)
+    # Never remove the directory: logs, reviews and events are the audit evidence. Hide it only.
     return {"job_id": job_id, "deleted": True}
 
 
@@ -327,11 +325,21 @@ def delete_plan(plan_id: str, body: Any) -> Any:
     body = only_fields(body, ("confirm",), ())
     if body.get("confirm") is not True:
         raise invalid("confirm", "Confirma la eliminación del plan del lienzo.")
-    path, plan = jobs.read_plan(plan_id)
-    if plan_edit.active_jobs(plan):
-        raise ActionError(409, "plan_active", "No se puede eliminar un plan con agentes en ejecución.")
-    plan["deleted"] = True
-    jobs.write_json(path / "plan.json", plan)
+    path = jobs.plan_dir(plan_id)
+    with jobs.record_lock(path):
+        _, plan = jobs.read_plan(plan_id)
+        if plan_edit.active_jobs(plan):
+            raise ActionError(409, "plan_active", "No se puede eliminar un plan con agentes en ejecución.")
+        plan["deleted"] = True
+        jobs.write_json(path / "plan.json", plan)
+    # A deleted plan must never keep launching work in the background.
+    import supervision
+    state_file = supervision.state_path(plan_id)
+    if state_file.exists():
+        with jobs.record_lock(state_file):
+            state = jobs.read_json(state_file)
+            state.update(enabled=False, auto_advance=False, auto_repair=False, updated_at=jobs.utc_now())
+            jobs.write_json(state_file, state)
     for item in plan.get("items", []):
         for jid in item.get("job_ids", []):
             jpath = jobs.job_dir(jid)
@@ -416,7 +424,7 @@ def create_plan(workspace: str, body: Any, *, plan_id: str | None = None) -> Any
 
 
 def edit_plan(plan_id: str, body: Any) -> Any:
-    only_fields(body, ('revision', 'title', 'goal', 'items'), ('coordinator', 'contract_source', 'executors', 'expensive_executors'))
+    only_fields(body, ('revision', 'title', 'goal', 'items'), ('coordinator', 'contract_source', 'executors', 'expensive_executors', 'confirm'))
     with private_text_file(json.dumps(body, ensure_ascii=False)) as source:
         try:
             return run_engine(['edit-plan', plan_id, f'--input-file={source}', '--json'])

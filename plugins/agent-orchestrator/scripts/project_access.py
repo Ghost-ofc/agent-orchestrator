@@ -81,7 +81,7 @@ def validate_hosts(value) -> list[dict]:
     seen = set()
     for raw in value:
         required = {'name', 'host', 'user', 'identity_file'}
-        if not isinstance(raw, dict) or not required.issubset(raw) or set(raw) - required - {'port'}:
+        if not isinstance(raw, dict) or not required.issubset(raw) or set(raw) - required - {'port', 'allow_root'}:
             raise AccessError('SSH: cada destino necesita name, host, user e identity_file; port es opcional.')
         if not isinstance(raw['name'], str) or not SSH_ALIAS.fullmatch(raw['name']) or raw['name'] in seen:
             raise AccessError('SSH: alias inválido o repetido.')
@@ -98,6 +98,8 @@ def validate_hosts(value) -> list[dict]:
         key = Path(identity).expanduser()
         if not key.is_absolute() or not key.is_file():
             raise AccessError('SSH: la clave indicada debe existir en este equipo. No pegues su contenido.')
+        if 'allow_root' in raw and type(raw['allow_root']) is not bool:
+            raise AccessError('SSH: allow_root debe ser verdadero o falso.')
         seen.add(raw['name'])
         hosts.append({**raw, 'port': port, 'identity_file': str(key.resolve())})
     return hosts

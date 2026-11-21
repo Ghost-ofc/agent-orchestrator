@@ -105,6 +105,23 @@ else:
         self.assertEqual(len(jobs.read_feedback()), count)
         self.assertEqual(len(state['operations']), 1)
 
+    def test_extra_claimed_check_not_run_by_reviewer_blocks_acceptance(self):
+        worker = self.worker(); self.reply(checks=[CHECK, 'python3 -c "print(1)"'])
+        state = self.process()
+        self.assertIsNone(jobs.get_status(jobs.job_dir(worker))['review'])
+        self.assertEqual(state['report']['state'], 'needs_user')
+
+    def test_deleting_a_plan_stops_its_supervision(self):
+        self.worker()
+        code, result = self.post(f'/api/projects/{self.pid}/plans/{self.plan_id}/delete', {'confirm': True})
+        self.assertEqual(code, 200, result)
+        state = supervision.read_state(self.plan_id)
+        self.assertFalse(state['enabled'])
+        self.assertFalse(state['auto_advance'])
+        before = len(list(jobs.jobs_dir().glob('*/meta.json')))
+        supervision.tick(self.plan_id)
+        self.assertEqual(len(list(jobs.jobs_dir().glob('*/meta.json'))), before)
+
     def test_technical_question_is_answered_by_coordinator_with_attribution(self):
         worker = self.worker(); self.question(worker, '¿Qué nombre debe tener la función auxiliar?')
         self.reply(action='answer', answer='Usa normalize_input, siguiendo la convención del módulo.')

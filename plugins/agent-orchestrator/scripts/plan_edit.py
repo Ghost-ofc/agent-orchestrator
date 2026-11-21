@@ -47,10 +47,57 @@ def write_document(path, content):
         temporary.unlink(missing_ok=True)
 
 
+def pool_from_body(actions, body, plan):
+    """Pool changes need an explicit confirmation; a protected expensive model is never approved implicitly.
+
+    A frontier model stays allowed only if the plan already carried that user approval or the request
+    lists it in expensive_executors. Anything else is rejected, never silently reclassified.
+    """
+    if body.get('confirm') is not True:
+        raise jobs.RunnerError('Confirma el cambio de ejecutores: ampliar el conjunto autorizado puede aumentar el costo.')
+    specs = actions.executors(body, 'executors', maximum=20)
+    explicit = {jobs.parse_executor_spec(spec, expensive_approved=True)['display']
+                for spec in (actions.executors(body, 'expensive_executors', maximum=4) if body.get('expensive_executors') else [])}
+    already = {entry['display'] for entry in (plan.get('executor_policy') or {}).get('allowed', []) if entry.get('expensive_user_approved')}
+    approved, expensive = [], []
+    for spec in specs:
+        parsed = jobs.parse_executor_spec(spec, expensive_approved=True)
+        if not jobs.is_expensive_executor_model(parsed.get('model')):
+            approved.append(spec)
+        elif parsed['display'] in already or parsed['display'] in explicit:
+            expensive.append(spec)
+        else:
+            raise jobs.RunnerError(f"{parsed['display']} es un modelo protegido de alto costo: acéptalo de forma explícita (expensive_executors).")
+    return jobs.executor_policy(approved, expensive)
+
+
+def validate_dependencies(items):
+    """Dependencies must name real tasks, never the task itself, and must be acyclic."""
+    ids = {item['id'] for item in items}
+    graph = {}
+    for item in items:
+        deps = item.get('depends_on') or []
+        if any(dep not in ids or dep == item['id'] for dep in deps) or len(set(deps)) != len(deps):
+            raise jobs.RunnerError('Las dependencias deben apuntar a otras tareas existentes del plan, sin repetirse.')
+        graph[item['id']] = deps
+    state = {}
+    def visit(node):
+        if state.get(node) == 1:
+            raise jobs.RunnerError('Las dependencias entre tareas forman un ciclo.')
+        if state.get(node) == 2:
+            return
+        state[node] = 1
+        for dep in graph[node]:
+            visit(dep)
+        state[node] = 2
+    for node in graph:
+        visit(node)
+
+
 def edit(plan_id, body):
     import panel_actions as actions
     try:
-        actions.only_fields(body, ('revision', 'title', 'goal', 'items'), ('coordinator', 'contract_source', 'executors', 'expensive_executors'))
+        actions.only_fields(body, ('revision', 'title', 'goal', 'items'), ('coordinator', 'contract_source', 'executors', 'expensive_executors', 'confirm'))
         expected = actions.text(body, 'revision', limit=64, single_line=True)
         title = actions.text(body, 'title', limit=200, single_line=True)
         goal = actions.text(body, 'goal', limit=5000)
@@ -125,16 +172,7 @@ def edit(plan_id, body):
                         raise jobs.RunnerError(str(exc)) from exc
             original = copy.deepcopy(plan)
             if 'executors' in body and body['executors'] is not None:
-                all_specs = actions.executors(body, 'executors', maximum=20)
-                approved = []
-                expensive = []
-                for spec in all_specs:
-                    parsed = jobs.parse_executor_spec(spec, expensive_approved=True)
-                    if jobs.is_expensive_executor_model(parsed.get('model')):
-                        expensive.append(spec)
-                    else:
-                        approved.append(spec)
-                plan['executor_policy'] = jobs.executor_policy(approved, expensive)
+                plan['executor_policy'] = pool_from_body(actions, body, plan)
             existing = {item['id']: item for item in plan.get('items', [])}
             allowed = {entry['display'] for entry in plan.get('executor_policy', {}).get('allowed', [])}
             ids, items = set(), []
@@ -163,6 +201,7 @@ def edit(plan_id, body):
                 if 'depends_on' in row:
                     item['depends_on'] = row['depends_on']
                 items.append(item)
+            validate_dependencies(items)
             removed = set(existing) - ids
             linked = {record.get('checklist_item') for record in jobs.read_feedback() if record.get('plan_id') == plan_id}
             if any(not editable(existing[key]) or key in linked for key in removed):

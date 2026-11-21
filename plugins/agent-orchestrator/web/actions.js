@@ -940,7 +940,7 @@ window.AOActions = ctx => {
       const project = state.project;
       const plan = await api(`/api/projects/${project}/plans/${planId}`);
       if (!plan.can_edit) throw problem('planEdit.active');
-      editing = { project, plan: planId, revision: plan.edit_revision, allowed: plan.executor_policy.allowed.map(entry => entry.display), items: plan.items.map(item => ({ ...item })) };
+      editing = { project, plan: planId, revision: plan.edit_revision, allowed: plan.executor_policy.allowed.map(entry => entry.display), originalAllowed: plan.executor_policy.allowed.map(entry => entry.display), items: plan.items.map(item => ({ ...item })) };
       element.elements.title.value = plan.title || '';
       element.elements.goal.value = plan.goal.objective || '';
       try {
@@ -1018,8 +1018,10 @@ window.AOActions = ctx => {
     if (!editing) return;
     const title = element.elements.title.value.trim(); const goal = element.elements.goal.value.trim();
     if (!title || !goal || !editing.items.length || editing.items.some(item => !item.title.trim())) throw problem('planEdit.required');
+    const poolChanged = JSON.stringify([...editing.allowed].sort()) !== JSON.stringify([...editing.originalAllowed].sort());
+    if (poolChanged && !confirm(t('planEdit.poolConfirm', { executors: editing.allowed.join(', ') }))) return;
     await api(`/api/projects/${editing.project}/plans/${editing.plan}/edit`, { revision: editing.revision, title, goal,
-      executors: editing.allowed,
+      executors: editing.allowed, ...(poolChanged ? { confirm: true } : {}),
       items: editing.items.map(item => ({ id: item.id, title: item.title, task: item.task || '', assigned_executor: item.assigned_executor || null, depends_on: item.depends_on || [] })) });
     state.pendingPlan = editing.plan;
   });

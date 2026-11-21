@@ -42,6 +42,8 @@ def ssh_command(manifest, args):
     host = next((entry for entry in manifest.get('ssh_hosts', []) if entry['name'] == args['host']), None)
     if host is None:
         raise ValueError('SSH destination is not approved for this project')
+    if host['user'] == 'root' and host.get('allow_root') is not True:
+        raise ValueError('Root SSH access is not enabled for this destination; the user must opt in explicitly')
     command = args.get('command')
     timeout = args.get('timeout_seconds', 60)
     if not isinstance(command, str) or not command.strip() or len(command) > 10000 or '\x00' in command or type(timeout) is not int or not 1 <= timeout <= 120:
@@ -62,7 +64,8 @@ def ssh_command(manifest, args):
 def run_ssh(manifest, args):
     argv, timeout = ssh_command(manifest, args)
     path = jobs.job_dir(manifest['job_id'])
-    jobs.add_event(jobs.channel_dir(path), 'ssh_started', host=args['host'], command_sha256=hashlib.sha256(args['command'].encode()).hexdigest())
+    jobs.add_event(jobs.channel_dir(path), 'ssh_started', host=args['host'], command=args['command'][:2000],
+                   command_sha256=hashlib.sha256(args['command'].encode()).hexdigest())
     child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
                              env={key: value for key, value in os.environ.items() if key not in {'SSH_AUTH_SOCK', 'SSH_AGENT_PID', 'SSH_ASKPASS', 'GIT_SSH', 'GIT_SSH_COMMAND'}})
     timed_out = False

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Review fixes for continuous execution: deleting a plan now also disables its supervision, and the
+  supervisor ignores deleted/dismissed plans; auto-advance no longer forces `--allow-dirty` or
+  concurrent writers (one job per workspace); supervised acceptance again requires every claimed check
+  to be a command the reviewer ran with exit code 0 (exact match; Antigravity success parsed from the
+  reported code, not prose); changing a plan's executor pool needs `confirm` and never approves a
+  protected expensive model implicitly; task dependencies must reference real tasks and be acyclic;
+  batch contracts reject unauthorized or re-pinned executors instead of picking one at random and the
+  raw log tail is no longer a contract source for structured event streams; deleting a job never
+  removes its audit directory; SSH audit events record the command, and `root` destinations need
+  `allow_root: true`; routing of sensitive worker questions covers ssh/root/sudo/prod.
 - Fix the Antigravity adapter: it passed `--print` before `--input-format`, but in `agy` `--print` takes
   the prompt as its value and swallowed the next flag, so every run failed. The documented stdin
   stream-json form needs no `--print`. No permission-bypass flag is added.

@@ -631,8 +631,8 @@ class DashboardState:
             panel_actions.only_fields(body, ('confirm',))
             if body.get('confirm') is not True:
                 raise panel_actions.invalid('confirm')
+            # The background supervisor picks the plan up within seconds; never run it inside the HTTP request.
             supervision.configure(plan, enabled=True, auto_repair=True, auto_advance=True)
-            supervision.tick(plan['plan_id'])
             return panel_actions.plan_view(plan)
         registry_path = project_registry_path()
         registry_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
