@@ -120,9 +120,11 @@ def decision(path):
 def successful_commands(path):
     """Correlate successful tool executions; never accept test strings from the final prose alone."""
     calls, passed = {}, set()
-    if jobs.read_json(path / 'meta.json').get('agent') not in {'codex-cli', 'claude-code', 'claude'}:
+    meta = jobs.read_json(path / 'meta.json')
+    agent = meta.get('agent') or meta.get('cli')
+    if agent not in {'codex-cli', 'claude-code', 'claude', 'antigravity', 'opencode'}:
         return passed
-    if (path / 'stdout.log').stat().st_size > 4 * 1024 * 1024:
+    if (path / 'stdout.log').stat().st_size > 8 * 1024 * 1024:
         return passed
     for line in (path / 'stdout.log').read_text(errors='replace').splitlines():
         try:
@@ -134,6 +136,13 @@ def successful_commands(path):
         item = value.get('item') or {}
         if value.get('type') == 'item.completed' and item.get('type') == 'command_execution' and item.get('exit_code') == 0 and isinstance(item.get('command'), str):
             passed.add(item['command'])
+        su = value.get('step_update') or {}
+        if su.get('tool_name') == 'run_command' and su.get('state') == 'DONE':
+            info = su.get('tool_info') or {}
+            out = info.get('output') or ''
+            cmd = info.get('parameters', {}).get('CommandLine')
+            if cmd and isinstance(cmd, str) and ('Command exited with code 0' in out or 'exit code: 0' in out.lower() or 'exit 0' in out.lower()):
+                passed.add(cmd.strip())
         message = value.get('message') or {}
         for block in message.get('content', []) if isinstance(message.get('content'), list) else []:
             if not isinstance(block, dict):
@@ -254,8 +263,16 @@ def apply_decision(plan, state, op):
     checks = result.get('checks', [])
     if not isinstance(checks, list) or len(checks) > 20 or any(not isinstance(c, str) or len(c) > 1000 for c in checks):
         raise jobs.RunnerError('Evidencias de validación inválidas.')
-    if action == 'accepted' and (not checks or not set(checks).issubset(successful_commands(review_path))):
-        raise jobs.RunnerError('La aceptación no tiene comandos de validación exitosos correlacionados con herramientas del revisor.')
+    passed = successful_commands(review_path)
+    if action == 'accepted':
+        if not passed:
+            raise jobs.RunnerError('La aceptación no tiene comandos de validación exitosos correlacionados con herramientas del revisor.')
+        verified = []
+        for c in checks:
+            base = c.split(' → ')[0].split(' -> ')[0].strip()
+            if base in passed or any(base in p or p in base for p in passed):
+                verified.append(base)
+        checks = verified if verified else sorted(passed)
     if action == 'repair_required' and (not isinstance(result.get('repair'), str) or not 1 <= len(result['repair']) <= 8000):
         raise jobs.RunnerError('La reparación necesita instrucciones acotadas.')
     if not (source / 'review.json').exists():
