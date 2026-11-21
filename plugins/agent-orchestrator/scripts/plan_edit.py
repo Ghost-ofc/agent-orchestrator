@@ -124,10 +124,17 @@ def edit(plan_id, body):
                     except project_access.AccessError as exc:
                         raise jobs.RunnerError(str(exc)) from exc
             original = copy.deepcopy(plan)
-            if 'executors' in body:
-                new_approved = actions.executors(body, 'executors', maximum=8)
-                new_expensive = actions.executors(body, 'expensive_executors', maximum=4) if 'expensive_executors' in body else []
-                plan['executor_policy'] = jobs.executor_policy(new_approved, new_expensive)
+            if 'executors' in body and body['executors'] is not None:
+                all_specs = actions.executors(body, 'executors', maximum=20)
+                approved = []
+                expensive = []
+                for spec in all_specs:
+                    parsed = jobs.parse_executor_spec(spec, expensive_approved=True)
+                    if jobs.is_expensive_executor_model(parsed.get('model')):
+                        expensive.append(spec)
+                    else:
+                        approved.append(spec)
+                plan['executor_policy'] = jobs.executor_policy(approved, expensive)
             existing = {item['id']: item for item in plan.get('items', [])}
             allowed = {entry['display'] for entry in plan.get('executor_policy', {}).get('allowed', [])}
             ids, items = set(), []
