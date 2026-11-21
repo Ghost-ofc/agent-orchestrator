@@ -636,7 +636,7 @@ window.AOActions = ctx => {
     select.replaceChildren(...values.map(value => { const option = node('option', st('plan', value)); option.value = value; option.selected = value === selected; return option; }));
   }
   function modelElements(prefix) {
-    return { select: $(prefix === 'plan' ? 'plan-harness' : `${prefix}-cli`), input: $(`${prefix}-model`), target: prefix === 'plan' ? $('plan-add-executor') : form(prefix).querySelector('[type=submit]') };
+    return { select: $(prefix === 'plan' ? 'plan-harness' : prefix === 'plan-edit' ? 'plan-edit-harness' : `${prefix}-cli`), input: $(`${prefix}-model`), target: prefix === 'plan' ? $('plan-add-executor') : form(prefix).querySelector('[type=submit]') };
   }
   function updateModelGate(prefix) {
     const picker = modelPickers.get(prefix); if (!picker) return;
