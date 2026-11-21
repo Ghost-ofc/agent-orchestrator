@@ -416,7 +416,7 @@ def create_plan(workspace: str, body: Any, *, plan_id: str | None = None) -> Any
 
 
 def edit_plan(plan_id: str, body: Any) -> Any:
-    only_fields(body, ('revision', 'title', 'goal', 'items'), ('coordinator', 'contract_source'))
+    only_fields(body, ('revision', 'title', 'goal', 'items'), ('coordinator', 'contract_source', 'executors', 'expensive_executors'))
     with private_text_file(json.dumps(body, ensure_ascii=False)) as source:
         try:
             return run_engine(['edit-plan', plan_id, f'--input-file={source}', '--json'])

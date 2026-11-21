@@ -438,8 +438,6 @@ def launch_eligible_pending_items(plan, state, all_jobs):
                 f"--checklist-item={item['id']}", '--allow-dirty', '--allow-concurrent-workspace', '--json']
         if model:
             argv.append(f"--model={model}")
-        is_expensive = jobs.is_expensive_executor_model(model)
-        argv.append(f"{'--approved-expensive-executor' if is_expensive else '--approved-executor'}={spec}")
         argv.extend(dep_job_args)
 
         with actions.private_text_file(item['task'] + '\n') as task_file:
